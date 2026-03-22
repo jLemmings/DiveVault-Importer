@@ -49,6 +49,7 @@ import time
 import webbrowser
 from datetime import datetime, timezone
 from queue import Empty, Queue
+from typing import Callable
 from urllib import error, parse, request
 
 try:
@@ -178,6 +179,8 @@ OFFICIAL_SUPPORTED_BRANDS = [
     "Uwatec",
     "Zeagle",
 ]
+
+APP_VERSION = "v0.1.0"
 
 
 # ----------------------------
@@ -539,6 +542,24 @@ class BackendDiveStore:
     def insert_dive_record(self, record: dict) -> bool:
         payload = self._request_json("POST", "/api/dives", payload=record)
         return bool(payload.get("inserted"))
+
+    def count_dives(self) -> int | None:
+        try:
+            payload = self._request_json(
+                "GET",
+                "/api/dives",
+                query={
+                    "limit": 1,
+                    "offset": 0,
+                    "include_samples": "false",
+                    "include_raw_data": "false",
+                },
+            )
+        except RuntimeError:
+            return None
+
+        total = payload.get("total")
+        return total if isinstance(total, int) and total >= 0 else None
 
     def close(self) -> None:
         return None
@@ -916,14 +937,20 @@ class ImportState:
         device: POINTER(dc_device_t),
         vendor: str,
         product: str,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> None:
         self.store = store
         self.device = device
         self.vendor = vendor
         self.product = product
+        self.progress_callback = progress_callback
         self.first_fingerprint: bytes | None = None
         self.imported = 0
         self.skipped = 0
+
+    def report_progress(self) -> None:
+        if self.progress_callback is not None:
+            self.progress_callback(self.imported, self.skipped)
 
 
 # Keep callback objects alive
@@ -1108,6 +1135,7 @@ def make_dive_callback() -> DC_DIVE_CALLBACK:
                     state.imported += 1
                 else:
                     state.skipped += 1
+                state.report_progress()
 
             finally:
                 LIB.dc_parser_destroy(parser)
@@ -1133,11 +1161,14 @@ def sync_dives(
     product: str = "Smart Air",
     backend_url: str | None = None,
     backend_auth_token: str | None = None,
-) -> None:
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, int]:
     if not backend_url:
         raise ValueError("Provide --backend-url.")
 
     store = BackendDiveStore(backend_url, auth_token=backend_auth_token)
+
+    existing_total = store.count_dives() if hasattr(store, "count_dives") else None
 
     context = POINTER(dc_context_t)()
     check(LIB.dc_context_new(byref(context)), "dc_context_new")
@@ -1160,7 +1191,7 @@ def sync_dives(
                 "dc_device_set_fingerprint",
             )
 
-        state = ImportState(store, device, vendor, product)
+        state = ImportState(store, device, vendor, product, progress_callback=progress_callback)
         state_box = py_object(state)
         state_ptr = ctypes.pointer(state_box)
 
@@ -1175,6 +1206,10 @@ def sync_dives(
         print(f"Skipped existing: {state.skipped}")
         if state.first_fingerprint:
             print(f"Saved fingerprint: {state.first_fingerprint.hex()}")
+        result = {"imported": state.imported, "skipped": state.skipped}
+        if isinstance(existing_total, int):
+            result["existing_total"] = existing_total
+        return result
 
     finally:
         if device:
@@ -1192,8 +1227,8 @@ class SyncDesktopApp:
     def __init__(self, root: tk.Tk, defaults: dict[str, str]) -> None:
         self.root = root
         self.root.title("Dive Sync")
-        self.root.geometry("760x560")
-        self.root.minsize(720, 520)
+        self.root.geometry("1180x820")
+        self.root.resizable(False, False)
 
         self.events: Queue[tuple[str, object]] = Queue()
         self.auth_token: str | None = load_auth_token()
@@ -1216,99 +1251,308 @@ class SyncDesktopApp:
         self.scan_in_progress = False
         self.login_in_progress = False
         self.sync_in_progress = False
+        self.sync_imported = 0
+        self.sync_skipped = 0
+        self.sync_existing_total: int | None = None
         self.detected_devices_by_port: dict[str, dict[str, str]] = {}
+        self.ui_ready = False
 
+        self._configure_theme()
+        self._build_ui()
+        self._sync_model_options()
+        self._update_ui_state()
         self.vendor_var.trace_add("write", self._handle_vendor_change)
         self.product_var.trace_add("write", self._handle_product_change)
         self.port_var.trace_add("write", self._handle_port_change)
-
-        self._build_ui()
-        self._sync_model_options()
-        self.refresh_ports()
+        self.ui_ready = True
         self.root.after(150, self._pump_events)
 
+    def _configure_theme(self) -> None:
+        self.colors = {
+            "bg": "#071f31",
+            "panel": "#0b2840",
+            "panel_alt": "#173148",
+            "panel_muted": "#16324a",
+            "panel_dark": "#06192a",
+            "border": "#173752",
+            "text": "#d8e8ff",
+            "muted": "#8ea8c2",
+            "accent": "#8db8ef",
+            "accent_soft": "#253f59",
+            "accent_strong": "#92bdf1",
+            "divider": "#2a4762",
+            "warning": "#ffbc79",
+            "disabled": "#47627f",
+            "success": "#9cc8ff",
+        }
+        self.root.configure(bg=self.colors["bg"])
+
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+
+        self.root.option_add("*TCombobox*Listbox.Background", self.colors["panel_muted"])
+        self.root.option_add("*TCombobox*Listbox.Foreground", self.colors["text"])
+        self.root.option_add("*TCombobox*Listbox.Font", ("Segoe UI", 12))
+
+        style.configure("Shell.TFrame", background=self.colors["bg"])
+        style.configure("Panel.TFrame", background=self.colors["panel"], borderwidth=0, relief="flat")
+        style.configure("PanelAlt.TFrame", background=self.colors["panel_alt"], borderwidth=0, relief="flat")
+        style.configure("Stat.TFrame", background=self.colors["panel"])
+        style.configure("Divider.TFrame", background=self.colors["divider"])
+        style.configure("Title.TLabel", background=self.colors["bg"], foreground=self.colors["accent"], font=("Segoe UI Semibold", 42))
+        style.configure("Brand.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI Semibold", 18))
+        style.configure("Subtitle.TLabel", background=self.colors["bg"], foreground="#c7d7ea", font=("Segoe UI", 15))
+        style.configure("Section.TLabel", background=self.colors["panel"], foreground=self.colors["text"], font=("Segoe UI Semibold", 17))
+        style.configure("SectionAlt.TLabel", background=self.colors["panel_alt"], foreground=self.colors["text"], font=("Segoe UI Semibold", 17))
+        style.configure("Field.TLabel", background=self.colors["panel"], foreground=self.colors["muted"], font=("Consolas", 10))
+        style.configure("FieldAlt.TLabel", background=self.colors["panel_alt"], foreground=self.colors["muted"], font=("Consolas", 10))
+        style.configure("Body.TLabel", background=self.colors["panel_alt"], foreground=self.colors["text"], font=("Segoe UI", 12))
+        style.configure("Muted.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Consolas", 10))
+        style.configure("Status.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Segoe UI", 10))
+        style.configure("MetricTitle.TLabel", background=self.colors["panel"], foreground=self.colors["muted"], font=("Consolas", 9))
+        style.configure("MetricValue.TLabel", background=self.colors["panel"], foreground=self.colors["accent"], font=("Segoe UI Light", 18))
+        style.configure(
+            "Dive.TCombobox",
+            foreground=self.colors["text"],
+            fieldbackground=self.colors["panel_muted"],
+            background=self.colors["panel_muted"],
+            borderwidth=0,
+            bordercolor=self.colors["panel_muted"],
+            lightcolor=self.colors["panel_muted"],
+            darkcolor=self.colors["panel_muted"],
+            arrowsize=18,
+            padding=(14, 12),
+        )
+        style.map(
+            "Dive.TCombobox",
+            fieldbackground=[("readonly", self.colors["panel_muted"]), ("disabled", self.colors["panel_dark"])],
+            foreground=[("readonly", self.colors["text"]), ("disabled", self.colors["disabled"])],
+            arrowcolor=[("readonly", self.colors["text"]), ("disabled", self.colors["disabled"])],
+            selectbackground=[("readonly", self.colors["panel_muted"])],
+            selectforeground=[("readonly", self.colors["text"])],
+        )
+        style.configure(
+            "Dive.TEntry",
+            foreground=self.colors["accent"],
+            fieldbackground=self.colors["panel_dark"],
+            background=self.colors["panel_dark"],
+            borderwidth=0,
+            bordercolor=self.colors["panel_dark"],
+            lightcolor=self.colors["panel_dark"],
+            darkcolor=self.colors["panel_dark"],
+            padding=(14, 12),
+        )
+        style.map(
+            "Dive.TEntry",
+            fieldbackground=[("readonly", self.colors["panel_dark"]), ("disabled", self.colors["panel_dark"])],
+            foreground=[("readonly", self.colors["accent"]), ("disabled", self.colors["disabled"])],
+        )
+        style.configure(
+            "Dark.TEntry",
+            foreground=self.colors["accent"],
+            fieldbackground=self.colors["panel_dark"],
+            background=self.colors["panel_dark"],
+            borderwidth=0,
+            bordercolor=self.colors["panel_dark"],
+            lightcolor=self.colors["panel_dark"],
+            darkcolor=self.colors["panel_dark"],
+            padding=(14, 12),
+        )
+        style.configure(
+            "Primary.TButton",
+            font=("Consolas", 12, "bold"),
+            foreground=self.colors["panel_dark"],
+            background=self.colors["accent_strong"],
+            borderwidth=0,
+            bordercolor=self.colors["accent_strong"],
+            lightcolor=self.colors["accent_strong"],
+            darkcolor=self.colors["accent_strong"],
+            padding=(18, 14),
+        )
+        style.map(
+            "Primary.TButton",
+            background=[("disabled", self.colors["accent_soft"]), ("active", "#a9cbf5")],
+            foreground=[("disabled", "#6d87a2"), ("active", self.colors["panel_dark"])],
+        )
+        style.configure(
+            "Secondary.TButton",
+            font=("Consolas", 11, "bold"),
+            foreground=self.colors["text"],
+            background=self.colors["accent_soft"],
+            borderwidth=0,
+            bordercolor=self.colors["accent_soft"],
+            lightcolor=self.colors["accent_soft"],
+            darkcolor=self.colors["accent_soft"],
+            padding=(16, 12),
+        )
+        style.map(
+            "Secondary.TButton",
+            background=[("disabled", self.colors["panel_muted"]), ("active", "#34506d")],
+            foreground=[("disabled", self.colors["disabled"]), ("active", self.colors["text"])],
+        )
+
     def _build_ui(self) -> None:
-        frame = ttk.Frame(self.root, padding=18)
+        frame = ttk.Frame(self.root, padding=(28, 26, 28, 20), style="Shell.TFrame")
         frame.pack(fill="both", expand=True)
-        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=3)
+        frame.columnconfigure(1, weight=2)
 
-        ttk.Label(frame, text="Dive Sync", font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(frame, text="Windows desktop login for the DiveVault backend.").grid(row=1, column=0, sticky="w", pady=(0, 14))
+        header = ttk.Frame(frame, style="Shell.TFrame")
+        header.grid(row=0, column=0, columnspan=2, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="DIVEVAULT", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            header,
+            text="Upload Dive Entries to DiveVault.",
+            style="Subtitle.TLabel",
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(0, 28))
 
-        step1_panel = ttk.LabelFrame(frame, text="1. Connect And Detect The Dive Computer", padding=12)
-        step1_panel.grid(row=2, column=0, sticky="ew")
+        step1_panel = ttk.Frame(frame, padding=24, style="Panel.TFrame")
+        step1_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 18))
+        step1_panel.columnconfigure(0, weight=1)
         step1_panel.columnconfigure(1, weight=1)
-        ttk.Label(step1_panel, textvariable=self.step1_var, wraplength=680).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        header1 = ttk.Frame(step1_panel, style="Panel.TFrame")
+        header1.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 20))
+        header1.columnconfigure(0, weight=1)
+        ttk.Label(header1, text="1. Connect Dive Computer", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Frame(header1, style="Divider.TFrame", height=1).grid(row=1, column=0, sticky="ew", pady=(10, 0), padx=(0, 18))
+        self.detect_badge = tk.Label(
+            header1,
+            text="DIVE_COMPUTER_NOT_DETECTED",
+            bg=self.colors["accent_soft"],
+            fg=self.colors["muted"],
+            font=("Consolas", 10, "bold"),
+            padx=16,
+            pady=9,
+            bd=0,
+        )
+        self.detect_badge.grid(row=0, column=1, rowspan=2, sticky="e")
+        ttk.Label(step1_panel, textvariable=self.step1_var, style="Muted.TLabel", wraplength=560).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(0, 18)
+        )
 
-        ttk.Label(step1_panel, text="Brand").grid(row=1, column=0, sticky="w")
+        ttk.Label(step1_panel, text="BRAND", style="Field.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 6))
         self.vendor_combo = ttk.Combobox(
             step1_panel,
             textvariable=self.vendor_var,
             values=list(SUPPORTED_DIVE_COMPUTERS.keys()),
             state="readonly",
+            style="Dive.TCombobox",
         )
-        self.vendor_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
+        self.vendor_combo.grid(row=3, column=0, sticky="ew", pady=(0, 18), padx=(0, 14))
 
-        ttk.Label(step1_panel, text="Model").grid(row=2, column=0, sticky="w")
-        self.product_combo = ttk.Combobox(step1_panel, textvariable=self.product_var, values=[], state="readonly")
-        self.product_combo.grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
+        ttk.Label(step1_panel, text="MODEL", style="Field.TLabel").grid(row=2, column=1, sticky="w", pady=(0, 6))
+        self.product_combo = ttk.Combobox(step1_panel, textvariable=self.product_var, values=[], state="readonly", style="Dive.TCombobox")
+        self.product_combo.grid(row=3, column=1, sticky="ew", pady=(0, 18))
 
-        ttk.Label(step1_panel, text="Serial Port").grid(row=3, column=0, sticky="w")
-        self.port_combo = ttk.Combobox(step1_panel, textvariable=self.port_var, values=[], state="readonly")
-        self.port_combo.grid(row=3, column=1, sticky="ew", pady=4)
-        self.scan_button = ttk.Button(step1_panel, text="Scan Ports", command=self.refresh_ports)
-        self.scan_button.grid(row=3, column=2, sticky="ew", padx=(10, 0))
+        ttk.Label(step1_panel, text="SERIAL PORT", style="Field.TLabel").grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.port_combo = ttk.Combobox(step1_panel, textvariable=self.port_var, values=[], state="readonly", style="Dive.TCombobox")
+        self.port_combo.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 18))
 
-        ttk.Label(step1_panel, text="Detected Dive Computer").grid(row=4, column=0, sticky="w")
-        ttk.Entry(step1_panel, textvariable=self.detected_device_var, state="readonly").grid(
-            row=4, column=1, columnspan=2, sticky="ew", pady=4
+        self.scan_button = ttk.Button(step1_panel, text="Scan for Dive Computer", command=self.refresh_ports, style="Secondary.TButton")
+        self.scan_button.grid(row=6, column=0, sticky="w", pady=(0, 22))
+
+        ttk.Label(step1_panel, text="Detected Dive Computer", style="Field.TLabel").grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Entry(step1_panel, textvariable=self.detected_device_var, state="readonly", style="Dive.TEntry").grid(
+            row=8, column=0, columnspan=2, sticky="ew"
         )
 
-        step2_panel = ttk.LabelFrame(frame, text="2. Login To The Backend", padding=12)
-        step2_panel.grid(row=3, column=0, sticky="ew", pady=(14, 10))
-        step2_panel.columnconfigure(1, weight=1)
-        ttk.Label(step2_panel, textvariable=self.step2_var, wraplength=680).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        ttk.Label(step2_panel, text="Backend URL").grid(row=1, column=0, sticky="w")
-        self.backend_url_entry = ttk.Entry(step2_panel, textvariable=self.backend_url_var)
-        self.backend_url_entry.grid(row=1, column=1, sticky="ew", pady=4)
-        ttk.Label(step2_panel, textvariable=self.auth_var, wraplength=680).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        self.login_button = ttk.Button(step2_panel, text="Sign In To Backend", command=self.start_login)
-        self.login_button.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        step2_panel = ttk.Frame(frame, padding=24, style="PanelAlt.TFrame")
+        step2_panel.grid(row=1, column=1, sticky="nsew")
+        step2_panel.columnconfigure(0, weight=1)
+        header2 = ttk.Frame(step2_panel, style="PanelAlt.TFrame")
+        header2.grid(row=0, column=0, sticky="ew", pady=(0, 18))
+        header2.columnconfigure(0, weight=1)
+        ttk.Label(header2, text="2. Authentication", style="SectionAlt.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Frame(header2, style="Divider.TFrame", height=1).grid(row=1, column=0, sticky="ew", pady=(10, 0), padx=(0, 28))
+        self.auth_badge = tk.Label(
+            header2,
+            text="NOT_AUTHENTICATED",
+            bg=self.colors["panel_alt"],
+            fg=self.colors["warning"],
+            font=("Consolas", 10, "bold"),
+            padx=4,
+            pady=2,
+            bd=0,
+        )
+        self.auth_badge.grid(row=1, column=0, sticky="w", pady=(14, 0))
+        ttk.Label(step2_panel, text="URL", style="FieldAlt.TLabel").grid(row=2, column=0, sticky="w", pady=(18, 6))
+        self.backend_url_entry = ttk.Entry(step2_panel, textvariable=self.backend_url_var, style="Dark.TEntry")
+        self.backend_url_entry.grid(row=3, column=0, sticky="ew")
+        auth_note = tk.Frame(step2_panel, bg=self.colors["panel_dark"], bd=0, highlightthickness=0)
+        auth_note.grid(row=4, column=0, sticky="ew", pady=(20, 20))
+        tk.Frame(auth_note, bg="#8f6d58", width=2).pack(side="left", fill="y")
+        tk.Label(
+            auth_note,
+            text="Authentication is required to synchronize localized dive\ntelemetry with the primary cloud server.",
+            bg=self.colors["panel_dark"],
+            fg=self.colors["text"],
+            justify="left",
+            font=("Segoe UI", 12),
+            padx=16,
+            pady=16,
+        ).pack(anchor="w")
+        ttk.Label(step2_panel, textvariable=self.step2_var, style="Body.TLabel", wraplength=420, justify="left").grid(
+            row=5, column=0, sticky="w", pady=(0, 18)
+        )
+        self.login_button = ttk.Button(step2_panel, text="Sign In", command=self.start_login, style="Primary.TButton")
+        self.login_button.grid(row=6, column=0, sticky="ew")
 
-        step3_panel = ttk.LabelFrame(frame, text="3. Start The Sync", padding=12)
-        step3_panel.grid(row=4, column=0, sticky="ew")
-        step3_panel.columnconfigure(0, weight=1)
+        step3_panel = ttk.Frame(frame, padding=24, style="Panel.TFrame")
+        step3_panel.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(18, 18))
+        step3_panel.columnconfigure(0, weight=0)
         step3_panel.columnconfigure(1, weight=1)
-        ttk.Label(step3_panel, textvariable=self.step3_var, wraplength=680).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        self.sync_button = ttk.Button(step3_panel, text="Start Sync", command=self.start_sync)
-        self.sync_button.grid(row=1, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(step3_panel, text="Close", command=self.root.destroy).grid(row=1, column=1, sticky="ew", padx=(6, 0))
+        step3_panel.columnconfigure(2, weight=0)
+        step3_panel.columnconfigure(3, weight=0)
+        sync_icon = tk.Label(
+            step3_panel,
+            text="\u27f3",
+            bg=self.colors["accent_soft"],
+            fg=self.colors["muted"],
+            font=("Segoe UI Symbol", 27),
+            width=3,
+            height=2,
+            bd=0,
+        )
+        sync_icon.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 18))
+        ttk.Label(step3_panel, text="3. Sync", style="Section.TLabel").grid(row=0, column=1, pady=(10, 0), sticky="w")
+        ttk.Label(step3_panel, textvariable=self.step3_var, style="Muted.TLabel", wraplength=520).grid(row=1, column=1, sticky="w")
+        self.close_button = ttk.Button(step3_panel, text="Close", command=self.root.destroy, style="Secondary.TButton")
+        self.close_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(18, 12))
+        self.sync_button = ttk.Button(step3_panel, text="Sync", command=self.start_sync, style="Primary.TButton")
+        self.sync_button.grid(row=0, column=3, rowspan=2, sticky="e")
 
-        log_panel = ttk.LabelFrame(frame, text="Status", padding=12)
-        log_panel.grid(row=5, column=0, sticky="nsew", pady=(14, 0))
-        log_panel.columnconfigure(0, weight=1)
-        log_panel.rowconfigure(1, weight=1)
-        ttk.Label(log_panel, textvariable=self.status_var, wraplength=640).grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.log_text = tk.Text(log_panel, height=16, wrap="word", state="disabled")
-        self.log_text.grid(row=1, column=0, sticky="nsew")
+        status_row = ttk.Frame(frame, style="Shell.TFrame")
+        status_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        status_row.columnconfigure(0, weight=1)
+        ttk.Label(status_row, text=f"Version {APP_VERSION}", style="Status.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(status_row, textvariable=self.status_var, style="Status.TLabel", wraplength=960).grid(row=0, column=1, sticky="e")
 
-        frame.rowconfigure(5, weight=1)
+        self.log_text = None
 
     def log(self, message: str) -> None:
         self.status_var.set(message)
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"{message}\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+        if self.log_text is not None:
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", f"{message}\n")
+            self.log_text.see("end")
+            self.log_text.configure(state="disabled")
 
     def _handle_port_change(self, *_args) -> None:
+        if not self.ui_ready:
+            return
         self._update_detected_device_field()
 
     def _handle_vendor_change(self, *_args) -> None:
+        if not self.ui_ready:
+            return
         self._sync_model_options()
         self._clear_detected_ports()
 
     def _handle_product_change(self, *_args) -> None:
+        if not self.ui_ready:
+            return
         self._clear_detected_ports()
 
     def _clear_detected_ports(self) -> None:
@@ -1361,13 +1605,58 @@ class SyncDesktopApp:
             self.step2_var.set("Complete Step 1 before backend login is enabled.")
 
         if self.sync_in_progress:
-            self.step3_var.set("Sync in progress...")
+            if self.sync_imported or self.sync_skipped:
+                self.step3_var.set(
+                    f"Sync in progress. {self.sync_imported} dives synced, {self.sync_skipped} already present."
+                )
+            else:
+                self.step3_var.set("Sync in progress. 0 dives synced.")
+        elif self.sync_existing_total is not None and self.sync_imported == 0 and self.sync_skipped == 0:
+            self.step3_var.set(f"No new dives to sync. {self.sync_existing_total} dives already present in the backend.")
         elif step1_complete and step2_complete:
             self.step3_var.set("Detection and login are complete. Start the sync when ready.")
         elif step1_complete:
             self.step3_var.set("Complete backend login before starting the sync.")
         else:
             self.step3_var.set("Complete Steps 1 and 2 before starting the sync.")
+
+        if self.scan_in_progress:
+            self.detect_badge.configure(
+                text="SCANNING_PORTS",
+                bg=self.colors["accent_soft"],
+                fg=self.colors["accent"],
+            )
+        elif step1_complete:
+            self.detect_badge.configure(
+                text="DIVE_COMPUTER_DETECTED",
+                bg=self.colors["accent_soft"],
+                fg=self.colors["success"],
+            )
+        else:
+            self.detect_badge.configure(
+                text="AWAITING_DEVICE",
+                bg=self.colors["accent_soft"],
+                fg=self.colors["muted"],
+            )
+
+        if self.login_in_progress:
+            self.auth_badge.configure(
+                text="AUTH_IN_PROGRESS",
+                bg=self.colors["panel_alt"],
+                fg=self.colors["accent"],
+            )
+        elif step2_complete:
+            self.auth_badge.configure(
+                text="AUTHENTICATED",
+                bg=self.colors["panel_alt"],
+                fg=self.colors["success"],
+            )
+        else:
+            self.auth_badge.configure(
+                text="NOT_AUTHENTICATED",
+                bg=self.colors["panel_alt"],
+                fg=self.colors["warning"],
+            )
 
         self.vendor_combo.configure(state="readonly" if not self.scan_in_progress else "disabled")
         self.product_combo.configure(state="readonly" if not self.scan_in_progress else "disabled")
@@ -1427,6 +1716,9 @@ class SyncDesktopApp:
         except Exception as exc:
             self.events.put(("ports_scan_failed", str(exc)))
 
+    def _queue_sync_progress(self, imported: int, skipped: int) -> None:
+        self.events.put(("sync_progress", {"imported": imported, "skipped": skipped}))
+
     def start_login(self) -> None:
         backend_url = self.backend_url_var.get().strip()
         if not backend_url:
@@ -1476,6 +1768,9 @@ class SyncDesktopApp:
             )
             return
 
+        self.sync_imported = 0
+        self.sync_skipped = 0
+        self.sync_existing_total = None
         self.sync_in_progress = True
         self._update_ui_state()
         self.log("Starting sync...")
@@ -1484,14 +1779,15 @@ class SyncDesktopApp:
 
     def _sync_worker(self, detection: dict[str, str]) -> None:
         try:
-            sync_dives(
+            result = sync_dives(
                 port=detection["port"],
                 vendor=detection["vendor"],
                 product=detection["product"],
                 backend_url=self.backend_url_var.get().strip(),
                 backend_auth_token=self.auth_token,
+                progress_callback=self._queue_sync_progress,
             )
-            self.events.put(("sync_complete", "Sync completed successfully."))
+            self.events.put(("sync_complete", result))
         except Exception as exc:
             self.events.put(("error", f"Sync failed: {exc}"))
 
@@ -1511,9 +1807,22 @@ class SyncDesktopApp:
                     email = payload.get("email") or "signed-in user"
                     self.auth_var.set(f"Signed in as {email}. Desktop sync token ready.")
                     self.log("Desktop login approved. You can start syncing now.")
+                elif event == "sync_progress":
+                    self.sync_imported = int(payload.get("imported", 0))
+                    self.sync_skipped = int(payload.get("skipped", 0))
+                    self.status_var.set(f"Syncing dives: {self.sync_imported} synced")
                 elif event == "sync_complete":
                     self.sync_in_progress = False
-                    self.log(str(payload))
+                    self.sync_imported = int(payload.get("imported", 0))
+                    self.sync_skipped = int(payload.get("skipped", 0))
+                    existing_total = payload.get("existing_total")
+                    self.sync_existing_total = existing_total if isinstance(existing_total, int) and existing_total >= 0 else None
+                    if self.sync_imported == 0 and self.sync_skipped == 0 and self.sync_existing_total is not None:
+                        self.log(f"No new dives to sync. {self.sync_existing_total} dives already present in the backend.")
+                    else:
+                        self.log(
+                            f"Sync completed successfully. {self.sync_imported} dives synced, {self.sync_skipped} already present."
+                        )
                 elif event == "ports_scanned":
                     self.scan_in_progress = False
                     vendor = payload["vendor"]
@@ -1599,7 +1908,7 @@ def main() -> None:
         run_gui(
             {
                 "port": args.port or "",
-                "backend_url": args.backend_url or "http://localhost:8000",
+                "backend_url": args.backend_url or "http://localhost:5173",
                 "vendor": args.vendor,
                 "product": args.product,
             }
