@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Download dives from a Mares Smart Air using libdivecomputer and store them in PostgreSQL
-or send them to a backend API.
+Download dives from a Mares Smart Air using libdivecomputer and send them to a backend API.
 
 Tested logic-wise against the libdivecomputer v0.9.0 public headers/API layout,
 but you should still expect to do a little hardware-specific debugging the first time.
 
 Usage:
-    python mares_smart_air_sync.py --port /dev/ttyUSB0 --database-url postgresql://dive:dive@localhost:5432/dive
     python mares_smart_air_sync.py --port COM3 --backend-url http://localhost:8000
     python mares_smart_air_sync.py --port COM3 --backend-url http://localhost:8000 --backend-auth-token <desktop_sync_token_or_session_token>
     python mares_smart_air_sync.py --gui
@@ -67,11 +65,6 @@ except ImportError:  # pragma: no cover - optional dependency
     list_ports = None
 
 from dotenv import load_dotenv
-
-try:
-    from .postgres_store import get_device_state, insert_dive_record, open_db, save_device_state
-except ImportError:  # pragma: no cover - direct execution fallback
-    from postgres_store import get_device_state, insert_dive_record, open_db, save_device_state
 
 
 _DLL_SEARCH_HANDLES: list[object] = []
@@ -144,6 +137,47 @@ DC_SAMPLE_PPO2 = 10
 DC_SAMPLE_CNS = 11
 DC_SAMPLE_DECO = 12
 DC_SAMPLE_GASMIX = 13
+
+OFFICIAL_SUPPORTED_BRANDS = [
+    "Aeris",
+    "Apeks",
+    "Aqualung",
+    "Atomic Aquatics",
+    "Beuchat",
+    "Citizen",
+    "Cochran",
+    "Cressi",
+    "Crest",
+    "Deepblu",
+    "Deep Six",
+    "Dive Rite",
+    "Divesoft",
+    "DiveSystem",
+    "Genesis",
+    "Halcyon",
+    "Heinrichs Weikamp",
+    "Hollis",
+    "Liquivision",
+    "Mares",
+    "McLean",
+    "Oceanic",
+    "Oceans",
+    "Ratio",
+    "Reefnet",
+    "Scorpena",
+    "Scubapro",
+    "Seac",
+    "Seemann",
+    "Shearwater",
+    "Sherwood",
+    "Sporasub",
+    "Subgear",
+    "Suunto",
+    "Tecdiving",
+    "Tusa",
+    "Uwatec",
+    "Zeagle",
+]
 
 
 # ----------------------------
@@ -441,25 +475,6 @@ def build_dive_record(
     }
 
 
-class PostgresDiveStore:
-    def __init__(self, database_url: str) -> None:
-        self.conn = open_db(database_url)
-
-    def get_saved_fingerprint(self, vendor: str, product: str) -> bytes | None:
-        state = get_device_state(self.conn, vendor, product)
-        fingerprint_hex = state.get("fingerprint_hex")
-        return bytes.fromhex(fingerprint_hex) if fingerprint_hex else None
-
-    def save_fingerprint(self, vendor: str, product: str, fp: bytes | None) -> None:
-        save_device_state(self.conn, vendor, product, fp.hex() if fp else None)
-
-    def insert_dive_record(self, record: dict) -> bool:
-        return insert_dive_record(self.conn, record)
-
-    def close(self) -> None:
-        self.conn.close()
-
-
 class BackendDiveStore:
     def __init__(self, base_url: str, auth_token: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
@@ -603,12 +618,170 @@ def build_cli_auth_url(base_url: str, code: str) -> str:
     return f"{base_url.rstrip('/')}/#settings/cli-auth/{parse.quote(code)}"
 
 
-def list_serial_ports() -> list[str]:
+def list_serial_port_infos() -> list[dict[str, str]]:
     if list_ports is not None:
-        return [port.device for port in list_ports.comports()]
+        ports = []
+        for port in list_ports.comports():
+            summary_parts = [part.strip() for part in (port.description, port.manufacturer) if part and part.strip()]
+            ports.append(
+                {
+                    "device": port.device,
+                    "summary": " | ".join(summary_parts),
+                }
+            )
+        return ports
     if os.name == "nt":
-        return [f"COM{index}" for index in range(1, 17)]
+        return [{"device": f"COM{index}", "summary": ""} for index in range(1, 17)]
     return []
+
+
+def list_serial_ports() -> list[str]:
+    return [port["device"] for port in list_serial_port_infos()]
+
+
+def descriptor_strings(descriptor: POINTER(dc_descriptor_t)) -> tuple[str, str]:
+    vendor_ptr = LIB.dc_descriptor_get_vendor(descriptor)
+    product_ptr = LIB.dc_descriptor_get_product(descriptor)
+    vendor = vendor_ptr.decode("utf-8") if vendor_ptr else ""
+    product = product_ptr.decode("utf-8") if product_ptr else ""
+    return vendor, product
+
+
+def format_dive_computer_name(vendor: str, product: str) -> str:
+    parts = [part.strip() for part in (vendor, product) if part and part.strip()]
+    return " ".join(parts) or "Unknown device"
+
+
+def load_supported_dive_computers() -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    context = POINTER(dc_context_t)()
+    status = LIB.dc_context_new(byref(context))
+    if status != DC_STATUS_SUCCESS:
+        raise RuntimeError(f"dc_context_new failed with libdivecomputer status={status}")
+
+    iterator = POINTER(dc_iterator_t)()
+    status = LIB.dc_descriptor_iterator_new(byref(iterator), context)
+    if status != DC_STATUS_SUCCESS:
+        if context:
+            LIB.dc_context_free(context)
+        raise RuntimeError(f"dc_descriptor_iterator_new failed with libdivecomputer status={status}")
+
+    try:
+        while True:
+            descriptor = POINTER(dc_descriptor_t)()
+            rc = LIB.dc_iterator_next(iterator, byref(descriptor))
+            if rc == DC_STATUS_DONE:
+                break
+            if rc != DC_STATUS_SUCCESS:
+                raise RuntimeError(f"dc_iterator_next(descriptor) failed with libdivecomputer status={rc}")
+
+            try:
+                vendor, product = descriptor_strings(descriptor)
+                if not vendor or not product:
+                    continue
+                models = grouped.setdefault(vendor, [])
+                if product not in models:
+                    models.append(product)
+            finally:
+                LIB.dc_descriptor_free(descriptor)
+    finally:
+        LIB.dc_iterator_free(iterator)
+        if context:
+            LIB.dc_context_free(context)
+
+    supported: dict[str, list[str]] = {}
+    for vendor in OFFICIAL_SUPPORTED_BRANDS:
+        models = grouped.get(vendor)
+        if models:
+            supported[vendor] = models
+    return supported
+
+
+SUPPORTED_DIVE_COMPUTERS = load_supported_dive_computers()
+
+
+def probe_descriptor_on_port(
+    context: POINTER(dc_context_t),
+    descriptor: POINTER(dc_descriptor_t),
+    port: str,
+    *,
+    require_download: bool = False,
+) -> bool:
+    iostream = POINTER(dc_iostream_t)()
+    device = POINTER(dc_device_t)()
+
+    try:
+        serial_status = LIB.dc_serial_open(byref(iostream), context, port.encode("utf-8"))
+        if serial_status != DC_STATUS_SUCCESS:
+            return False
+
+        device_status = LIB.dc_device_open(byref(device), context, descriptor, iostream)
+        if device_status != DC_STATUS_SUCCESS:
+            return False
+
+        if not require_download:
+            return True
+
+        def stop_after_first_dive(
+            _data: POINTER(c_ubyte),
+            _size: int,
+            _fingerprint: POINTER(c_ubyte),
+            _fsize: int,
+            _userdata: int,
+        ) -> int:
+            return 0
+
+        dive_cb = DC_DIVE_CALLBACK(stop_after_first_dive)
+        foreach_status = LIB.dc_device_foreach(device, dive_cb, None)
+        return foreach_status == DC_STATUS_SUCCESS
+    finally:
+        if device:
+            LIB.dc_device_close(device)
+        if iostream:
+            LIB.dc_iostream_close(iostream)
+
+
+def scan_supported_serial_ports(
+    vendor: str,
+    product: str,
+    candidate_ports: list[str] | None = None,
+) -> list[str]:
+    ports = candidate_ports or list_serial_ports()
+    if not ports:
+        return []
+
+    context = POINTER(dc_context_t)()
+    check(LIB.dc_context_new(byref(context)), "dc_context_new")
+    descriptor = None
+
+    try:
+        descriptor = find_descriptor(context, vendor, product)
+        return [
+            port
+            for port in ports
+            if probe_descriptor_on_port(context, descriptor, port, require_download=True)
+        ]
+    finally:
+        if descriptor:
+            LIB.dc_descriptor_free(descriptor)
+        if context:
+            LIB.dc_context_free(context)
+
+
+def auto_detect_port(vendor: str, product: str) -> str:
+    ports = list_serial_ports()
+    if not ports:
+        raise RuntimeError("No serial ports found while scanning for a supported dive computer.")
+
+    supported_ports = scan_supported_serial_ports(vendor, product, candidate_ports=ports)
+    if not supported_ports:
+        raise RuntimeError(f"No supported {vendor} {product} dive computer detected on any serial port.")
+    if len(supported_ports) > 1:
+        raise RuntimeError(
+            f"Multiple supported {vendor} {product} dive computers detected on: {', '.join(supported_ports)}. "
+            "Specify --port explicitly."
+        )
+    return supported_ports[0]
 
 
 # ----------------------------
@@ -713,10 +886,7 @@ def find_descriptor(context: POINTER(dc_context_t), vendor: str, product: str) -
                 break
             check(rc, "dc_iterator_next(descriptor)")
 
-            v = LIB.dc_descriptor_get_vendor(desc)
-            p = LIB.dc_descriptor_get_product(desc)
-            v_str = v.decode("utf-8") if v else ""
-            p_str = p.decode("utf-8") if p else ""
+            v_str, p_str = descriptor_strings(desc)
 
             if v_str == vendor and p_str == product:
                 return desc  # caller owns this descriptor
@@ -961,16 +1131,13 @@ def sync_dives(
     port: str,
     vendor: str = "Mares",
     product: str = "Smart Air",
-    database_url: str | None = None,
     backend_url: str | None = None,
     backend_auth_token: str | None = None,
 ) -> None:
-    if backend_url:
-        store = BackendDiveStore(backend_url, auth_token=backend_auth_token)
-    elif database_url:
-        store = PostgresDiveStore(database_url)
-    else:
-        raise ValueError("Provide either --database-url or --backend-url.")
+    if not backend_url:
+        raise ValueError("Provide --backend-url.")
+
+    store = BackendDiveStore(backend_url, auth_token=backend_auth_token)
 
     context = POINTER(dc_context_t)()
     check(LIB.dc_context_new(byref(context)), "dc_context_new")
@@ -1034,60 +1201,98 @@ class SyncDesktopApp:
         self.current_code: str | None = None
 
         self.backend_url_var = tk.StringVar(value=defaults.get("backend_url") or "http://localhost:8000")
-        self.vendor_var = tk.StringVar(value=defaults.get("vendor") or "Mares")
-        self.product_var = tk.StringVar(value=defaults.get("product") or "Smart Air")
+        default_vendor = defaults.get("vendor") or next(iter(SUPPORTED_DIVE_COMPUTERS))
+        default_models = SUPPORTED_DIVE_COMPUTERS.get(default_vendor, [])
+        default_product = defaults.get("product") or (default_models[0] if default_models else "")
+        self.vendor_var = tk.StringVar(value=default_vendor)
+        self.product_var = tk.StringVar(value=default_product)
         self.port_var = tk.StringVar(value=defaults.get("port") or "")
+        self.detected_device_var = tk.StringVar(value="Not detected")
         self.status_var = tk.StringVar(value="Ready. Sign in to the backend to start syncing.")
-        self.auth_var = tk.StringVar(value="Not signed in")
+        self.auth_var = tk.StringVar(value="Desktop sync token already loaded." if self.auth_token else "Not signed in")
+        self.step1_var = tk.StringVar(value="Choose your dive computer model and scan for it.")
+        self.step2_var = tk.StringVar(value="Sign in after a dive computer has been detected.")
+        self.step3_var = tk.StringVar(value="Start sync after detection and backend login are complete.")
+        self.scan_in_progress = False
+        self.login_in_progress = False
+        self.sync_in_progress = False
+        self.detected_devices_by_port: dict[str, dict[str, str]] = {}
+
+        self.vendor_var.trace_add("write", self._handle_vendor_change)
+        self.product_var.trace_add("write", self._handle_product_change)
+        self.port_var.trace_add("write", self._handle_port_change)
 
         self._build_ui()
+        self._sync_model_options()
         self.refresh_ports()
         self.root.after(150, self._pump_events)
 
     def _build_ui(self) -> None:
         frame = ttk.Frame(self.root, padding=18)
         frame.pack(fill="both", expand=True)
-        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
 
-        ttk.Label(frame, text="Dive Sync", font=("Segoe UI", 18, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(frame, text="Windows desktop login for the DiveVault backend.").grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 14))
+        ttk.Label(frame, text="Dive Sync", font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(frame, text="Windows desktop login for the DiveVault backend.").grid(row=1, column=0, sticky="w", pady=(0, 14))
 
-        ttk.Label(frame, text="Backend URL").grid(row=2, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.backend_url_var).grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
+        step1_panel = ttk.LabelFrame(frame, text="1. Connect And Detect The Dive Computer", padding=12)
+        step1_panel.grid(row=2, column=0, sticky="ew")
+        step1_panel.columnconfigure(1, weight=1)
+        ttk.Label(step1_panel, textvariable=self.step1_var, wraplength=680).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
-        ttk.Label(frame, text="Serial Port").grid(row=3, column=0, sticky="w")
-        self.port_combo = ttk.Combobox(frame, textvariable=self.port_var, values=[], state="normal")
+        ttk.Label(step1_panel, text="Brand").grid(row=1, column=0, sticky="w")
+        self.vendor_combo = ttk.Combobox(
+            step1_panel,
+            textvariable=self.vendor_var,
+            values=list(SUPPORTED_DIVE_COMPUTERS.keys()),
+            state="readonly",
+        )
+        self.vendor_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
+
+        ttk.Label(step1_panel, text="Model").grid(row=2, column=0, sticky="w")
+        self.product_combo = ttk.Combobox(step1_panel, textvariable=self.product_var, values=[], state="readonly")
+        self.product_combo.grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
+
+        ttk.Label(step1_panel, text="Serial Port").grid(row=3, column=0, sticky="w")
+        self.port_combo = ttk.Combobox(step1_panel, textvariable=self.port_var, values=[], state="readonly")
         self.port_combo.grid(row=3, column=1, sticky="ew", pady=4)
-        ttk.Button(frame, text="Refresh Ports", command=self.refresh_ports).grid(row=3, column=2, sticky="ew", padx=(10, 0))
+        self.scan_button = ttk.Button(step1_panel, text="Scan Ports", command=self.refresh_ports)
+        self.scan_button.grid(row=3, column=2, sticky="ew", padx=(10, 0))
 
-        ttk.Label(frame, text="Vendor").grid(row=4, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.vendor_var).grid(row=4, column=1, columnspan=2, sticky="ew", pady=4)
+        ttk.Label(step1_panel, text="Detected Dive Computer").grid(row=4, column=0, sticky="w")
+        ttk.Entry(step1_panel, textvariable=self.detected_device_var, state="readonly").grid(
+            row=4, column=1, columnspan=2, sticky="ew", pady=4
+        )
 
-        ttk.Label(frame, text="Product").grid(row=5, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.product_var).grid(row=5, column=1, columnspan=2, sticky="ew", pady=4)
+        step2_panel = ttk.LabelFrame(frame, text="2. Login To The Backend", padding=12)
+        step2_panel.grid(row=3, column=0, sticky="ew", pady=(14, 10))
+        step2_panel.columnconfigure(1, weight=1)
+        ttk.Label(step2_panel, textvariable=self.step2_var, wraplength=680).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(step2_panel, text="Backend URL").grid(row=1, column=0, sticky="w")
+        self.backend_url_entry = ttk.Entry(step2_panel, textvariable=self.backend_url_var)
+        self.backend_url_entry.grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Label(step2_panel, textvariable=self.auth_var, wraplength=680).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.login_button = ttk.Button(step2_panel, text="Sign In To Backend", command=self.start_login)
+        self.login_button.grid(row=3, column=0, sticky="w", pady=(10, 0))
 
-        status_panel = ttk.LabelFrame(frame, text="Authentication", padding=12)
-        status_panel.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(14, 10))
-        status_panel.columnconfigure(0, weight=1)
-        ttk.Label(status_panel, textvariable=self.auth_var, wraplength=640).grid(row=0, column=0, sticky="w")
-        ttk.Button(status_panel, text="Sign In To Backend", command=self.start_login).grid(row=1, column=0, sticky="w", pady=(10, 0))
-
-        actions = ttk.Frame(frame)
-        actions.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(4, 10))
-        actions.columnconfigure(0, weight=1)
-        actions.columnconfigure(1, weight=1)
-        ttk.Button(actions, text="Start Sync", command=self.start_sync).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(actions, text="Close", command=self.root.destroy).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        step3_panel = ttk.LabelFrame(frame, text="3. Start The Sync", padding=12)
+        step3_panel.grid(row=4, column=0, sticky="ew")
+        step3_panel.columnconfigure(0, weight=1)
+        step3_panel.columnconfigure(1, weight=1)
+        ttk.Label(step3_panel, textvariable=self.step3_var, wraplength=680).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.sync_button = ttk.Button(step3_panel, text="Start Sync", command=self.start_sync)
+        self.sync_button.grid(row=1, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(step3_panel, text="Close", command=self.root.destroy).grid(row=1, column=1, sticky="ew", padx=(6, 0))
 
         log_panel = ttk.LabelFrame(frame, text="Status", padding=12)
-        log_panel.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        log_panel.grid(row=5, column=0, sticky="nsew", pady=(14, 0))
         log_panel.columnconfigure(0, weight=1)
         log_panel.rowconfigure(1, weight=1)
         ttk.Label(log_panel, textvariable=self.status_var, wraplength=640).grid(row=0, column=0, sticky="w", pady=(0, 8))
         self.log_text = tk.Text(log_panel, height=16, wrap="word", state="disabled")
         self.log_text.grid(row=1, column=0, sticky="nsew")
 
-        frame.rowconfigure(8, weight=1)
+        frame.rowconfigure(5, weight=1)
 
     def log(self, message: str) -> None:
         self.status_var.set(message)
@@ -1096,12 +1301,131 @@ class SyncDesktopApp:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def _handle_port_change(self, *_args) -> None:
+        self._update_detected_device_field()
+
+    def _handle_vendor_change(self, *_args) -> None:
+        self._sync_model_options()
+        self._clear_detected_ports()
+
+    def _handle_product_change(self, *_args) -> None:
+        self._clear_detected_ports()
+
+    def _clear_detected_ports(self) -> None:
+        self.detected_devices_by_port = {}
+        self.port_combo["values"] = []
+        self.port_var.set("")
+        self.detected_device_var.set("Not detected")
+        self._update_ui_state()
+
+    def _sync_model_options(self) -> None:
+        vendor = self.vendor_var.get().strip()
+        models = SUPPORTED_DIVE_COMPUTERS.get(vendor, [])
+        self.product_combo["values"] = models
+        current_product = self.product_var.get().strip()
+        if current_product not in models:
+            self.product_var.set(models[0] if models else "")
+
+    def _update_detected_device_field(self) -> None:
+        current_port = self.port_var.get().strip()
+        detection = self.detected_devices_by_port.get(current_port)
+        if detection is None:
+            self.detected_device_var.set("Not detected")
+        else:
+            self.detected_device_var.set(detection["label"])
+        self._update_ui_state()
+
+    def _has_detected_device(self) -> bool:
+        current_port = self.port_var.get().strip()
+        detection = self.detected_devices_by_port.get(current_port)
+        return detection is not None and detection.get("confirmed") == "true"
+
+    def _update_ui_state(self) -> None:
+        step1_complete = self._has_detected_device()
+        step2_complete = bool(self.auth_token)
+
+        if self.scan_in_progress:
+            self.step1_var.set("Scanning serial ports for the selected dive computer...")
+        elif step1_complete:
+            self.step1_var.set("Dive computer detected. Continue to backend login.")
+        else:
+            self.step1_var.set("Choose your dive computer model and scan until it is detected on a COM port.")
+
+        if self.login_in_progress:
+            self.step2_var.set("Browser login in progress. Finish approval in the opened browser tab.")
+        elif step2_complete:
+            self.step2_var.set("Backend login completed. You can start the sync.")
+        elif step1_complete:
+            self.step2_var.set("Dive computer detected. Sign in to the backend to continue.")
+        else:
+            self.step2_var.set("Complete Step 1 before backend login is enabled.")
+
+        if self.sync_in_progress:
+            self.step3_var.set("Sync in progress...")
+        elif step1_complete and step2_complete:
+            self.step3_var.set("Detection and login are complete. Start the sync when ready.")
+        elif step1_complete:
+            self.step3_var.set("Complete backend login before starting the sync.")
+        else:
+            self.step3_var.set("Complete Steps 1 and 2 before starting the sync.")
+
+        self.vendor_combo.configure(state="readonly" if not self.scan_in_progress else "disabled")
+        self.product_combo.configure(state="readonly" if not self.scan_in_progress else "disabled")
+        self.port_combo.configure(state="readonly" if step1_complete and not self.scan_in_progress else "disabled")
+        self.scan_button.configure(state="disabled" if self.scan_in_progress else "normal")
+        self.backend_url_entry.configure(state="normal" if not self.login_in_progress and not self.sync_in_progress else "disabled")
+        self.login_button.configure(state="normal" if step1_complete and not self.login_in_progress and not self.sync_in_progress else "disabled")
+        self.sync_button.configure(
+            state="normal" if step1_complete and step2_complete and not self.sync_in_progress else "disabled"
+        )
+
     def refresh_ports(self) -> None:
-        ports = list_serial_ports()
-        self.port_combo["values"] = ports
-        if ports and not self.port_var.get():
-            self.port_var.set(ports[0])
-        self.log("Serial ports refreshed.")
+        if self.scan_in_progress:
+            self.log("Serial port scan already in progress.")
+            return
+
+        vendor = self.vendor_var.get().strip()
+        product = self.product_var.get().strip()
+        if not vendor or not product:
+            self.log("Choose a brand and model before scanning.")
+            return
+
+        self.scan_in_progress = True
+        self.detected_device_var.set("Scanning...")
+        self.log(f"Scanning serial ports for {format_dive_computer_name(vendor, product)}...")
+        self._update_ui_state()
+        thread = threading.Thread(target=self._scan_ports_worker, args=(vendor, product), daemon=True)
+        thread.start()
+
+    def _scan_ports_worker(self, vendor: str, product: str) -> None:
+        try:
+            port_infos = list_serial_port_infos()
+            ports = [info["device"] for info in port_infos]
+            detected_ports = scan_supported_serial_ports(vendor, product, candidate_ports=ports)
+            label = format_dive_computer_name(vendor, product)
+            detections = [
+                {
+                    "port": port,
+                    "vendor": vendor,
+                    "product": product,
+                    "label": label,
+                    "confirmed": "true",
+                }
+                for port in detected_ports
+            ]
+            self.events.put(
+                (
+                    "ports_scanned",
+                    {
+                        "vendor": vendor,
+                        "product": product,
+                        "port_infos": port_infos,
+                        "detections": detections,
+                    },
+                )
+            )
+        except Exception as exc:
+            self.events.put(("ports_scan_failed", str(exc)))
 
     def start_login(self) -> None:
         backend_url = self.backend_url_var.get().strip()
@@ -1109,6 +1433,8 @@ class SyncDesktopApp:
             messagebox.showerror("Missing backend URL", "Enter the backend URL before signing in.")
             return
 
+        self.login_in_progress = True
+        self._update_ui_state()
         self.log("Creating desktop login request...")
         thread = threading.Thread(target=self._login_worker, daemon=True)
         thread.start()
@@ -1133,22 +1459,35 @@ class SyncDesktopApp:
     def start_sync(self) -> None:
         port = self.port_var.get().strip()
         if not port:
-            messagebox.showerror("Missing serial port", "Choose or enter the Mares Smart Air serial port.")
+            messagebox.showerror("Missing serial port", "Choose a detected dive computer serial port.")
             return
         if not self.auth_token:
             messagebox.showerror("Not signed in", "Sign in to the backend first.")
             return
+        detection = self.detected_devices_by_port.get(port)
+        if detection is None:
+            messagebox.showerror("Device not detected", "Run Scan Ports and choose a serial port with a detected dive computer.")
+            return
+        if detection.get("confirmed") != "true":
+            messagebox.showerror(
+                "Device not confirmed",
+                "The scan found a possible dive computer on this port, but could not confirm the exact model. "
+                "Sync is blocked to avoid using the wrong device descriptor.",
+            )
+            return
 
+        self.sync_in_progress = True
+        self._update_ui_state()
         self.log("Starting sync...")
-        thread = threading.Thread(target=self._sync_worker, daemon=True)
+        thread = threading.Thread(target=self._sync_worker, args=(detection,), daemon=True)
         thread.start()
 
-    def _sync_worker(self) -> None:
+    def _sync_worker(self, detection: dict[str, str]) -> None:
         try:
             sync_dives(
-                port=self.port_var.get().strip(),
-                vendor=self.vendor_var.get().strip() or "Mares",
-                product=self.product_var.get().strip() or "Smart Air",
+                port=detection["port"],
+                vendor=detection["vendor"],
+                product=detection["product"],
                 backend_url=self.backend_url_var.get().strip(),
                 backend_auth_token=self.auth_token,
             )
@@ -1166,19 +1505,68 @@ class SyncDesktopApp:
                     self.log(f"Opened browser for backend login approval: {payload['approval_url']}")
                     webbrowser.open(payload["approval_url"])
                 elif event == "login_approved":
+                    self.login_in_progress = False
                     self.auth_token = payload.get("token")
                     self.auth_token_expires_at = payload.get("token_expires_at")
                     email = payload.get("email") or "signed-in user"
                     self.auth_var.set(f"Signed in as {email}. Desktop sync token ready.")
                     self.log("Desktop login approved. You can start syncing now.")
                 elif event == "sync_complete":
+                    self.sync_in_progress = False
+                    self.log(str(payload))
+                elif event == "ports_scanned":
+                    self.scan_in_progress = False
+                    vendor = payload["vendor"]
+                    product = payload["product"]
+                    port_infos = payload["port_infos"]
+                    ports = [info["device"] for info in port_infos]
+                    detections = payload["detections"]
+                    self.detected_devices_by_port = {detection["port"]: detection for detection in detections}
+                    detected_ports = [detection["port"] for detection in detections]
+
+                    self.port_combo["values"] = detected_ports
+
+                    current_port = self.port_var.get().strip()
+                    if detected_ports:
+                        if current_port not in detected_ports:
+                            self.port_var.set(detected_ports[0])
+                        self._update_detected_device_field()
+                        if len(detections) == 1:
+                            detection = detections[0]
+                            self.log(f"Detected {detection['label']} on {detection['port']}.")
+                        else:
+                            summary = ", ".join(f"{detection['port']} ({detection['label']})" for detection in detections)
+                            self.log(f"Detected dive computers on: {summary}.")
+                    else:
+                        self.detected_devices_by_port = {}
+                        self.port_combo["values"] = []
+                        if current_port:
+                            self.port_var.set("")
+                        self._update_detected_device_field()
+                        if ports:
+                            self.log(
+                                f"No {format_dive_computer_name(vendor, product)} detected. "
+                                f"Available serial ports: {', '.join(ports)}."
+                            )
+                        else:
+                            self.port_combo["values"] = []
+                            self.port_var.set("")
+                            self.detected_device_var.set("Not detected")
+                            self.log("No serial ports found.")
+                elif event == "ports_scan_failed":
+                    self.scan_in_progress = False
+                    self.detected_devices_by_port = {}
+                    self._update_detected_device_field()
                     self.log(str(payload))
                 elif event == "error":
+                    self.login_in_progress = False
+                    self.sync_in_progress = False
                     self.log(str(payload))
                     messagebox.showerror("Dive Sync", str(payload))
         except Empty:
             pass
         finally:
+            self._update_ui_state()
             self.root.after(150, self._pump_events)
 
 
@@ -1189,14 +1577,17 @@ def run_gui(defaults: dict[str, str]) -> None:
     root = tk.Tk()
     app = SyncDesktopApp(root, defaults)
     app.log("Desktop UI ready.")
-    root.mainloop()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        if root.winfo_exists():
+            root.destroy()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gui", action="store_true", help="Launch the Windows desktop UI")
-    parser.add_argument("--port", help="Serial port, e.g. /dev/ttyUSB0 or COM3")
-    parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"), help="PostgreSQL connection string")
+    parser.add_argument("--port", help="Serial port, e.g. /dev/ttyUSB0 or COM3. Use 'auto' to scan detected serial ports.")
     parser.add_argument("--backend-url", default=os.getenv("BACKEND_URL"), help="Backend base URL, e.g. http://localhost:8000")
     parser.add_argument("--backend-auth-token", help="Desktop sync token or Clerk session token for authenticated backend API access")
     parser.add_argument("--backend-auth-token-file", help="Path to a file containing the backend desktop sync token or session token")
@@ -1215,18 +1606,19 @@ def main() -> None:
         )
         return
 
-    if not args.port:
-        parser.error("Provide --port or run with --gui.")
-    if not args.database_url and not args.backend_url:
-        parser.error("Provide either --database-url or --backend-url.")
+    port = (args.port or "").strip()
+    if not port or port.lower() == "auto":
+        port = auto_detect_port(args.vendor, args.product)
+        print(f"Detected {args.vendor} {args.product} on {port}")
+    if not args.backend_url:
+        parser.error("Provide --backend-url.")
 
     backend_auth_token = load_auth_token(args.backend_auth_token, args.backend_auth_token_file)
 
     sync_dives(
-        port=args.port,
+        port=port,
         vendor=args.vendor,
         product=args.product,
-        database_url=args.database_url,
         backend_url=args.backend_url,
         backend_auth_token=backend_auth_token,
     )

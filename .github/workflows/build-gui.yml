@@ -19,11 +19,11 @@ jobs:
             artifact_path: dist/DiveSync.exe
             python_cmd: python
             use_setup_python: true
-          - os: ubuntu-latest
-            artifact_name: divesync-linux
-            artifact_path: dist/DiveSync
-            python_cmd: python3
-            use_setup_python: false
+          # - os: ubuntu-latest
+          #   artifact_name: divesync-linux
+          #   artifact_path: dist/DiveSync
+          #   python_cmd: python3
+          #   use_setup_python: false
 
     steps:
       - name: Check out repository
@@ -35,11 +35,11 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdivecomputer0 python3-pip python3-tk
+      # - name: Install Linux system dependencies
+      #   if: runner.os == 'Linux'
+      #   run: |
+      #     sudo apt-get update
+      #     sudo apt-get install -y libdivecomputer0 python3-pip python3-tk
 
       - name: Install Python dependencies
         run: |

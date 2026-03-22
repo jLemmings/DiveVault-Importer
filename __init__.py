@@ -1,1 +1,1 @@
-# Importer package for the Windows dive sync client and shared storage helpers.
+# Importer package for the dive sync client.
