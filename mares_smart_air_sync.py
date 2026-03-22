@@ -1904,7 +1904,9 @@ def main() -> None:
     parser.add_argument("--product", default="Smart Air")
     args = parser.parse_args()
 
-    if args.gui:
+    launch_gui = args.gui or (getattr(sys, "frozen", False) and len(sys.argv) == 1)
+
+    if launch_gui:
         run_gui(
             {
                 "port": args.port or "",
