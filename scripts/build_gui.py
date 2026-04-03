@@ -14,9 +14,10 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRYPOINT = ROOT / "mares_smart_air_sync.py"
 DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
-BUILD_ASSETS_DIR = BUILD_DIR / "assets"
+BUILD_ASSETS_DIR = ROOT / ".pyinstaller-assets"
 LOGO_PNG = ROOT / "logo.png"
 LOGO_ICO = BUILD_ASSETS_DIR / "logo.ico"
+SPEC_FILE = ROOT / "DiveSync.spec"
 
 
 def binary_separator() -> str:
@@ -157,6 +158,9 @@ def pyinstaller_args() -> list[str]:
 def main() -> None:
     DIST_DIR.mkdir(exist_ok=True)
     BUILD_DIR.mkdir(exist_ok=True)
+    BUILD_ASSETS_DIR.mkdir(exist_ok=True)
+    if SPEC_FILE.exists():
+        SPEC_FILE.unlink()
     print(f"Building GUI for {platform.system()} with Python {platform.python_version()}")
     PyInstaller.__main__.run(pyinstaller_args())
 
