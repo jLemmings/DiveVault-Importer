@@ -44,6 +44,8 @@ import hashlib
 import json
 import sys
 import os
+import subprocess
+import tempfile
 import threading
 import time
 import webbrowser
@@ -79,6 +81,62 @@ def executable_dir() -> str:
 
 def resource_dir() -> str:
     return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+def set_windows_appusermodel_id() -> None:
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DiveVault.DiveSync")
+    except Exception:
+        return
+
+
+def convert_png_to_ico(source_png: str, target_ico: str) -> bool:
+    if os.name != "nt":
+        return False
+
+    script = """
+param([string]$src, [string]$dst)
+Add-Type -AssemblyName System.Drawing
+$bmp = [System.Drawing.Bitmap]::FromFile($src)
+try {
+    $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+    try {
+        $stream = [System.IO.File]::Open($dst, [System.IO.FileMode]::Create)
+        try {
+            $icon.Save($stream)
+        } finally {
+            $stream.Close()
+        }
+    } finally {
+        $icon.Dispose()
+    }
+} finally {
+    $bmp.Dispose()
+}
+"""
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script, source_png, target_ico],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def ensure_runtime_icon_path() -> str | None:
+    png_path = os.path.join(resource_dir(), "logo.png")
+    if not os.path.exists(png_path):
+        return None
+
+    ico_path = os.path.join(tempfile.gettempdir(), "dive_sync_runtime_icon.ico")
+    if not convert_png_to_ico(png_path, ico_path):
+        return None
+    return ico_path
 
 
 def load_optional_dotenv() -> None:
@@ -1202,10 +1260,6 @@ def sync_dives(
         if state.first_fingerprint is not None:
             store.save_fingerprint(vendor, product, state.first_fingerprint)
 
-        print(f"Imported: {state.imported}")
-        print(f"Skipped existing: {state.skipped}")
-        if state.first_fingerprint:
-            print(f"Saved fingerprint: {state.first_fingerprint.hex()}")
         result = {"imported": state.imported, "skipped": state.skipped}
         if isinstance(existing_total, int):
             result["existing_total"] = existing_total
@@ -1229,6 +1283,9 @@ class SyncDesktopApp:
         self.root.title("Dive Sync")
         self.root.geometry("1180x820")
         self.root.resizable(False, False)
+        self._icon_image: tk.PhotoImage | None = None
+        self._runtime_icon_path: str | None = None
+        self._configure_window_icon()
 
         self.events: Queue[tuple[str, object]] = Queue()
         self.auth_token: str | None = load_auth_token()
@@ -1266,6 +1323,29 @@ class SyncDesktopApp:
         self.port_var.trace_add("write", self._handle_port_change)
         self.ui_ready = True
         self.root.after(150, self._pump_events)
+
+    def _configure_window_icon(self) -> None:
+        icon_path = os.path.join(resource_dir(), "logo.png")
+        if os.path.exists(icon_path):
+            try:
+                self._icon_image = tk.PhotoImage(file=icon_path)
+                self.root.iconphoto(True, self._icon_image)
+            except tk.TclError:
+                self._icon_image = None
+
+        if os.name == "nt":
+            self._runtime_icon_path = ensure_runtime_icon_path()
+            self._apply_windows_titlebar_icon()
+            self.root.after_idle(self._apply_windows_titlebar_icon)
+            self.root.after(250, self._apply_windows_titlebar_icon)
+
+    def _apply_windows_titlebar_icon(self) -> None:
+        if os.name != "nt" or not self._runtime_icon_path:
+            return
+        try:
+            self.root.iconbitmap(self._runtime_icon_path)
+        except tk.TclError:
+            return
 
     def _configure_theme(self) -> None:
         self.colors = {
@@ -1883,6 +1963,7 @@ def run_gui(defaults: dict[str, str]) -> None:
     if tk is None or ttk is None or messagebox is None:
         raise RuntimeError("Tkinter is not available in this Python installation. Install tkinter or run the CLI mode instead.")
 
+    set_windows_appusermodel_id()
     root = tk.Tk()
     app = SyncDesktopApp(root, defaults)
     app.log("Desktop UI ready.")
@@ -1910,7 +1991,7 @@ def main() -> None:
         run_gui(
             {
                 "port": args.port or "",
-                "backend_url": args.backend_url or "http://localhost:5173",
+                "backend_url": args.backend_url or "https://divevault.local.joshuahemmings.ch",
                 "vendor": args.vendor,
                 "product": args.product,
             }
