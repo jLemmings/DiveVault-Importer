@@ -85,14 +85,21 @@ def resource_dir() -> str:
 
 def vendored_runtime_dirs() -> list[str]:
     project_dir = os.path.dirname(os.path.abspath(__file__))
-    runtime_root = os.path.join(project_dir, "libdivecomputer-0.9.0", "runtime")
+    libdivecomputer_root = os.path.join(project_dir, "libdivecomputer-0.9.0")
+    runtime_root = os.path.join(libdivecomputer_root, "runtime")
     if os.name == "nt":
-        platform_dir = os.path.join(runtime_root, "windows")
+        platform_name = "windows"
     elif sys.platform == "darwin":
-        platform_dir = os.path.join(runtime_root, "macos")
+        platform_name = "macos"
     else:
-        platform_dir = os.path.join(runtime_root, "linux")
-    return [platform_dir, runtime_root]
+        platform_name = "linux"
+
+    return [
+        os.path.join(runtime_root, platform_name),
+        os.path.join(libdivecomputer_root, platform_name),
+        runtime_root,
+        libdivecomputer_root,
+    ]
 
 
 def set_windows_appusermodel_id() -> None:

@@ -14,6 +14,7 @@ ENTRYPOINT = ROOT / "divevault-importer.py"
 DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
 BUILD_ASSETS_DIR = ROOT / ".pyinstaller-assets"
+LIBDIVECOMPUTER_DIR = ROOT / "libdivecomputer-0.9.0"
 RUNTIME_DEPS_DIR = ROOT / "libdivecomputer-0.9.0" / "runtime"
 LOGO_PNG = ROOT / "logo.png"
 LOGO_ICO = BUILD_ASSETS_DIR / "logo.ico"
@@ -80,16 +81,25 @@ def platform_runtime_dir() -> Path:
     return RUNTIME_DEPS_DIR / platform_name
 
 
-def collect_runtime_files(patterns: tuple[str, ...]) -> list[Path]:
+def candidate_dependency_roots() -> list[Path]:
     runtime_dir = platform_runtime_dir()
-    if not runtime_dir.exists():
-        raise FileNotFoundError(f"Missing runtime dependency directory: {runtime_dir}")
+    roots = [runtime_dir]
+    platform_dir = LIBDIVECOMPUTER_DIR / runtime_dir.name
+    if platform_dir != runtime_dir:
+        roots.append(platform_dir)
+    roots.append(LIBDIVECOMPUTER_DIR)
+    return roots
 
+
+def collect_runtime_files(patterns: tuple[str, ...]) -> list[Path]:
     files: dict[str, Path] = {}
-    for pattern in patterns:
-        for path in sorted(runtime_dir.glob(pattern)):
-            if path.is_file():
-                files[str(path.resolve())] = path.resolve()
+    for root in candidate_dependency_roots():
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            for path in sorted(root.rglob(pattern)):
+                if path.is_file():
+                    files[str(path.resolve())] = path.resolve()
 
     return sorted(files.values(), key=str)
 
@@ -98,9 +108,10 @@ def require_runtime_match(files: list[Path], expected: tuple[str, ...], descript
     if any(file.name.startswith(prefix) for file in files for prefix in expected):
         return
     expected_names = ", ".join(expected)
+    searched = ", ".join(str(path) for path in candidate_dependency_roots())
     raise FileNotFoundError(
-        f"Missing {description} in {platform_runtime_dir()}. "
-        f"Expected a file starting with one of: {expected_names}"
+        f"Missing {description}. Expected a file starting with one of: {expected_names}. "
+        f"Searched under: {searched}"
     )
 
 
