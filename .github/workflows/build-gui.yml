@@ -91,12 +91,29 @@ jobs:
           echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
           echo "RELEASE_PRERELEASE=$prerelease_flag" >> "$GITHUB_ENV"
 
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-upload
+
+          if [ -f release-assets/divesync-windows/DiveSync.exe ]; then
+            cp release-assets/divesync-windows/DiveSync.exe "release-upload/DiveSync-windows-${RELEASE_VERSION}.exe"
+          fi
+
+          if [ -f release-assets/divesync-linux/DiveSync ]; then
+            cp release-assets/divesync-linux/DiveSync "release-upload/DiveSync-linux-${RELEASE_VERSION}"
+          fi
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          mapfile -t assets < <(find release-assets -type f \( -name 'DiveSync.exe' -o -name 'DiveSync' \))
+          mapfile -t assets < <(find release-upload -maxdepth 1 -type f)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release-upload assets were prepared." >&2
+            exit 1
+          fi
+
           release_args=(
             "$RELEASE_VERSION"
             "${assets[@]}"
