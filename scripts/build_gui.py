@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ctypes.util
 import os
 import platform
 import subprocess
@@ -11,10 +10,11 @@ import PyInstaller.__main__
 
 
 ROOT = Path(__file__).resolve().parent.parent
-ENTRYPOINT = ROOT / "mares_smart_air_sync.py"
+ENTRYPOINT = ROOT / "divevault-importer.py"
 DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
 BUILD_ASSETS_DIR = ROOT / ".pyinstaller-assets"
+RUNTIME_DEPS_DIR = ROOT / "libdivecomputer-0.9.0" / "runtime"
 LOGO_PNG = ROOT / "logo.png"
 LOGO_ICO = BUILD_ASSETS_DIR / "logo.ico"
 SPEC_FILE = ROOT / "DiveSync.spec"
@@ -70,57 +70,55 @@ def ensure_windows_icon() -> Path:
     return LOGO_ICO
 
 
-def windows_binaries() -> list[str]:
-    binaries = []
-    for name in ("libdivecomputer.dll", "libusb-1.0.dll", "libhidapi-0.dll"):
-        path = ROOT / name
-        if not path.exists():
-            raise FileNotFoundError(f"Missing required Windows runtime dependency: {path}")
-        binaries.append(add_binary_arg(path))
-    return binaries
+def platform_runtime_dir() -> Path:
+    if os.name == "nt":
+        platform_name = "windows"
+    elif sys.platform.startswith("linux"):
+        platform_name = "linux"
+    else:
+        platform_name = "macos"
+    return RUNTIME_DEPS_DIR / platform_name
 
 
-def locate_linux_library() -> Path:
-    discovered = ctypes.util.find_library("divecomputer")
-    candidates = [discovered] if discovered else []
-    candidates.extend(
-        [
-            "/lib/x86_64-linux-gnu/libdivecomputer.so.0",
-            "/usr/lib/x86_64-linux-gnu/libdivecomputer.so.0",
-            "/usr/local/lib/libdivecomputer.so.0",
-        ]
+def collect_runtime_files(patterns: tuple[str, ...]) -> list[Path]:
+    runtime_dir = platform_runtime_dir()
+    if not runtime_dir.exists():
+        raise FileNotFoundError(f"Missing runtime dependency directory: {runtime_dir}")
+
+    files: dict[str, Path] = {}
+    for pattern in patterns:
+        for path in sorted(runtime_dir.glob(pattern)):
+            if path.is_file():
+                files[str(path.resolve())] = path.resolve()
+
+    return sorted(files.values(), key=str)
+
+
+def require_runtime_match(files: list[Path], expected: tuple[str, ...], description: str) -> None:
+    if any(file.name.startswith(prefix) for file in files for prefix in expected):
+        return
+    expected_names = ", ".join(expected)
+    raise FileNotFoundError(
+        f"Missing {description} in {platform_runtime_dir()}. "
+        f"Expected a file starting with one of: {expected_names}"
     )
 
-    for candidate in candidates:
-        if not candidate:
-            continue
-        path = Path(candidate)
-        if not path.is_absolute():
-            resolved = subprocess.run(
-                ["bash", "-lc", f"ldconfig -p | awk '/{candidate}/ {{print $NF; exit}}'"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            if resolved:
-                path = Path(resolved)
-        if path.exists():
-            return path.resolve()
 
-    raise FileNotFoundError("Could not locate libdivecomputer on this Linux runner.")
+def bundled_runtime_binaries() -> list[str]:
+    if os.name == "nt":
+        files = collect_runtime_files(("*.dll",))
+        require_runtime_match(files, ("libdivecomputer.dll",), "libdivecomputer runtime")
+        require_runtime_match(files, ("libusb-1.0.dll",), "libusb runtime")
+        require_runtime_match(files, ("libhidapi-0.dll",), "hidapi runtime")
+    elif sys.platform.startswith("linux"):
+        files = collect_runtime_files(("*.so", "*.so.*"))
+        require_runtime_match(files, ("libdivecomputer.so",), "libdivecomputer runtime")
+        require_runtime_match(files, ("libusb-",), "libusb runtime")
+        require_runtime_match(files, ("libhidapi-",), "hidapi runtime")
+    else:
+        files = []
 
-
-def linux_binaries() -> list[str]:
-    primary = locate_linux_library()
-    binaries = {primary}
-    ldd = subprocess.run(["ldd", str(primary)], check=True, capture_output=True, text=True).stdout
-    for line in ldd.splitlines():
-        parts = line.strip().split()
-        if len(parts) >= 3 and parts[1] == "=>" and parts[2].startswith("/"):
-            dependency = Path(parts[2]).resolve()
-            if dependency.name.startswith(("libusb-", "libhidapi-")):
-                binaries.add(dependency)
-    return [add_binary_arg(path) for path in sorted(binaries, key=str)]
+    return [add_binary_arg(path) for path in files]
 
 
 def pyinstaller_args() -> list[str]:
@@ -146,10 +144,10 @@ def pyinstaller_args() -> list[str]:
 
     if os.name == "nt":
         args.extend(["--icon", str(ensure_windows_icon())])
-        for binary in windows_binaries():
+        for binary in bundled_runtime_binaries():
             args.extend(["--add-binary", binary])
     elif sys.platform.startswith("linux"):
-        for binary in linux_binaries():
+        for binary in bundled_runtime_binaries():
             args.extend(["--add-binary", binary])
 
     return args

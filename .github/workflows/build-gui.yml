@@ -19,30 +19,25 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: divesync-windows
-            artifact_path: dist/DiveSync.exe
+            artifact_path: dist/divesync-windows.zip
             python_cmd: python
-            use_setup_python: true
-          # - os: ubuntu-latest
-          #   artifact_name: divesync-linux
-          #   artifact_path: dist/DiveSync
-          #   python_cmd: python3
-          #   use_setup_python: false
+          - os: ubuntu-latest
+            artifact_name: divesync-linux
+            artifact_path: dist/divesync-linux.tar.gz
+            python_cmd: python
+          - os: macos-latest
+            artifact_name: divesync-macos
+            artifact_path: dist/divesync-macos.zip
+            python_cmd: python
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
-        if: matrix.use_setup_python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
-      # - name: Install Linux system dependencies
-      #   if: runner.os == 'Linux'
-      #   run: |
-      #     sudo apt-get update
-      #     sudo apt-get install -y libdivecomputer0 python3-pip python3-tk
 
       - name: Install Python dependencies
         run: |
@@ -52,11 +47,25 @@ jobs:
       - name: Build GUI executable
         run: ${{ matrix.python_cmd }} scripts/build_gui.py
 
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -LiteralPath dist\DiveSync.exe -DestinationPath dist\divesync-windows.zip -Force
+
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        run: tar -C dist -czf dist/divesync-linux.tar.gz DiveSync
+
+      - name: Package macOS artifact
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/DiveSync.app dist/divesync-macos.zip
+
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
 
   release:
     if: github.event_name != 'pull_request'
