@@ -103,6 +103,12 @@ jobs:
             cp release-assets/divesync-linux/DiveSync "release-upload/DiveSync-linux-${RELEASE_VERSION}"
           fi
 
+          if [ -d release-assets/divesync-macos/DiveSync.app ]; then
+            ditto -c -k --sequesterRsrc --keepParent \
+              release-assets/divesync-macos/DiveSync.app \
+              "release-upload/DiveSync-macos-${RELEASE_VERSION}.zip"
+          fi
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -6,9 +6,7 @@ Tested logic-wise against the libdivecomputer v0.9.0 public headers/API layout,
 but you should still expect to do a little hardware-specific debugging the first time.
 
 Usage:
-    python divevault-importer.py --port COM3 --backend-url http://localhost:8000
-    python divevault-importer.py --port COM3 --backend-url http://localhost:8000 --backend-auth-token <desktop_sync_token_or_session_token>
-    python divevault-importer.py --gui
+    python divevault-importer.py
 
 Notes:
 - This example uses SERIAL transport (clip/cable). The Mares Smart Air also supports BLE,
@@ -20,7 +18,6 @@ Notes:
 
 from __future__ import annotations
 
-import argparse
 import base64
 import ctypes
 from ctypes import (
@@ -81,6 +78,10 @@ def resource_dir() -> str:
     return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
 
+def default_backend_url() -> str:
+    return os.getenv("BACKEND_URL") or "https://divevault.local.joshuahemmings.ch"
+
+
 def load_app_version() -> str:
     candidates = [
         os.path.join(resource_dir(), "VERSION"),
@@ -106,6 +107,54 @@ def load_app_version() -> str:
             return version
 
     return "0.0.1"
+
+
+def settings_dir() -> str:
+    if os.name == "nt":
+        base_dir = os.getenv("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        base_dir = os.getenv("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base_dir, "DiveVault Importer")
+
+
+def settings_file_path() -> str:
+    return os.path.join(settings_dir(), "settings.json")
+
+
+def load_saved_defaults() -> dict[str, str]:
+    path = settings_file_path()
+    if not os.path.exists(path):
+        return {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    defaults: dict[str, str] = {}
+    for key in ("backend_url", "vendor", "product", "port"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            defaults[key] = value.strip()
+    return defaults
+
+
+def save_defaults(defaults: dict[str, str]) -> None:
+    os.makedirs(settings_dir(), exist_ok=True)
+    payload = {
+        "backend_url": defaults.get("backend_url", "").strip(),
+        "vendor": defaults.get("vendor", "").strip(),
+        "product": defaults.get("product", "").strip(),
+        "port": defaults.get("port", "").strip(),
+    }
+    with open(settings_file_path(), "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
 
 
 def vendored_runtime_dirs() -> list[str]:
@@ -598,8 +647,7 @@ class BackendDiveStore:
             if exc.code in {401, 403}:
                 raise RuntimeError(
                     f"Backend authentication failed: {method} {url} -> {exc.code} {details}. "
-                    "Provide a valid desktop sync token or Clerk session token with --backend-auth-token, "
-                    "--backend-auth-token-file, or BACKEND_AUTH_TOKEN."
+                    "Sign in through the desktop app or provide BACKEND_AUTH_TOKEN."
                 ) from exc
             raise RuntimeError(f"Backend request failed: {method} {url} -> {exc.code} {details}") from exc
         except error.URLError as exc:
@@ -655,12 +703,7 @@ class BackendDiveStore:
         return None
 
 
-def load_auth_token(token: str | None = None, token_file: str | None = None) -> str | None:
-    if token:
-        return normalize_bearer_token(token)
-    if token_file:
-        with open(token_file, "r", encoding="utf-8") as handle:
-            return normalize_bearer_token(handle.read())
+def load_auth_token() -> str | None:
     env_token = os.getenv("BACKEND_AUTH_TOKEN") or os.getenv("CLERK_SESSION_TOKEN")
     return normalize_bearer_token(env_token)
 
@@ -763,6 +806,10 @@ def format_dive_computer_name(vendor: str, product: str) -> str:
     return " ".join(parts) or "Unknown device"
 
 
+def sort_display_names(values: list[str]) -> list[str]:
+    return sorted(values, key=str.casefold)
+
+
 def load_supported_dive_computers() -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = {}
     context = POINTER(dc_context_t)()
@@ -801,10 +848,10 @@ def load_supported_dive_computers() -> dict[str, list[str]]:
             LIB.dc_context_free(context)
 
     supported: dict[str, list[str]] = {}
-    for vendor in OFFICIAL_SUPPORTED_BRANDS:
+    for vendor in sort_display_names(OFFICIAL_SUPPORTED_BRANDS):
         models = grouped.get(vendor)
         if models:
-            supported[vendor] = models
+            supported[vendor] = sort_display_names(models)
     return supported
 
 
@@ -877,22 +924,6 @@ def scan_supported_serial_ports(
             LIB.dc_descriptor_free(descriptor)
         if context:
             LIB.dc_context_free(context)
-
-
-def auto_detect_port(vendor: str, product: str) -> str:
-    ports = list_serial_ports()
-    if not ports:
-        raise RuntimeError("No serial ports found while scanning for a supported dive computer.")
-
-    supported_ports = scan_supported_serial_ports(vendor, product, candidate_ports=ports)
-    if not supported_ports:
-        raise RuntimeError(f"No supported {vendor} {product} dive computer detected on any serial port.")
-    if len(supported_ports) > 1:
-        raise RuntimeError(
-            f"Multiple supported {vendor} {product} dive computers detected on: {', '.join(supported_ports)}. "
-            "Specify --port explicitly."
-        )
-    return supported_ports[0]
 
 
 # ----------------------------
@@ -1254,7 +1285,7 @@ def sync_dives(
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, int]:
     if not backend_url:
-        raise ValueError("Provide --backend-url.")
+        raise ValueError("Provide a backend URL.")
 
     store = BackendDiveStore(backend_url, auth_token=backend_auth_token)
 
@@ -1353,6 +1384,7 @@ class SyncDesktopApp:
         self.vendor_var.trace_add("write", self._handle_vendor_change)
         self.product_var.trace_add("write", self._handle_product_change)
         self.port_var.trace_add("write", self._handle_port_change)
+        self.backend_url_var.trace_add("write", self._handle_backend_url_change)
         self.ui_ready = True
         self.root.after(150, self._pump_events)
 
@@ -1652,21 +1684,42 @@ class SyncDesktopApp:
             self.log_text.see("end")
             self.log_text.configure(state="disabled")
 
+    def _persist_defaults(self) -> None:
+        try:
+            save_defaults(
+                {
+                    "backend_url": self.backend_url_var.get(),
+                    "vendor": self.vendor_var.get(),
+                    "product": self.product_var.get(),
+                    "port": self.port_var.get(),
+                }
+            )
+        except OSError:
+            return
+
+    def _handle_backend_url_change(self, *_args) -> None:
+        if not self.ui_ready:
+            return
+        self._persist_defaults()
+
     def _handle_port_change(self, *_args) -> None:
         if not self.ui_ready:
             return
         self._update_detected_device_field()
+        self._persist_defaults()
 
     def _handle_vendor_change(self, *_args) -> None:
         if not self.ui_ready:
             return
         self._sync_model_options()
         self._clear_detected_ports()
+        self._persist_defaults()
 
     def _handle_product_change(self, *_args) -> None:
         if not self.ui_ready:
             return
         self._clear_detected_ports()
+        self._persist_defaults()
 
     def _clear_detected_ports(self) -> None:
         self.detected_devices_by_port = {}
@@ -1994,7 +2047,7 @@ class SyncDesktopApp:
 
 def run_gui(defaults: dict[str, str]) -> None:
     if tk is None or ttk is None or messagebox is None:
-        raise RuntimeError("Tkinter is not available in this Python installation. Install tkinter or run the CLI mode instead.")
+        raise RuntimeError("Tkinter is not available in this Python installation.")
 
     set_windows_appusermodel_id()
     root = tk.Tk()
@@ -2008,44 +2061,15 @@ def run_gui(defaults: dict[str, str]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--gui", action="store_true", help="Launch the Windows desktop UI")
-    parser.add_argument("--port", help="Serial port, e.g. /dev/ttyUSB0 or COM3. Use 'auto' to scan detected serial ports.")
-    parser.add_argument("--backend-url", default=os.getenv("BACKEND_URL"), help="Backend base URL, e.g. http://localhost:8000")
-    parser.add_argument("--backend-auth-token", help="Desktop sync token or Clerk session token for authenticated backend API access")
-    parser.add_argument("--backend-auth-token-file", help="Path to a file containing the backend desktop sync token or session token")
-    parser.add_argument("--vendor", default="Mares")
-    parser.add_argument("--product", default="Smart Air")
-    args = parser.parse_args()
-
-    launch_gui = args.gui or (getattr(sys, "frozen", False) and len(sys.argv) == 1)
-
-    if launch_gui:
-        run_gui(
-            {
-                "port": args.port or "",
-                "backend_url": args.backend_url or "https://divevault.local.joshuahemmings.ch",
-                "vendor": args.vendor,
-                "product": args.product,
-            }
-        )
-        return
-
-    port = (args.port or "").strip()
-    if not port or port.lower() == "auto":
-        port = auto_detect_port(args.vendor, args.product)
-        print(f"Detected {args.vendor} {args.product} on {port}")
-    if not args.backend_url:
-        parser.error("Provide --backend-url.")
-
-    backend_auth_token = load_auth_token(args.backend_auth_token, args.backend_auth_token_file)
-
-    sync_dives(
-        port=port,
-        vendor=args.vendor,
-        product=args.product,
-        backend_url=args.backend_url,
-        backend_auth_token=backend_auth_token,
+    defaults = {
+        "port": "",
+        "backend_url": default_backend_url(),
+        "vendor": "Mares",
+        "product": "Smart Air",
+    }
+    defaults.update(load_saved_defaults())
+    run_gui(
+        defaults
     )
 
 
