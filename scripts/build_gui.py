@@ -18,6 +18,7 @@ LIBDIVECOMPUTER_DIR = ROOT / "libdivecomputer-0.9.0"
 RUNTIME_DEPS_DIR = ROOT / "libdivecomputer-0.9.0" / "runtime"
 LOGO_PNG = ROOT / "logo.png"
 LOGO_ICO = ROOT / "logo.ico"
+VERSION_FILE = ROOT / "VERSION"
 SPEC_FILE = ROOT / "DiveSync.spec"
 
 
@@ -155,6 +156,8 @@ def pyinstaller_args() -> list[str]:
 
     if LOGO_PNG.exists():
         args.extend(["--add-data", add_data_arg(LOGO_PNG)])
+    if VERSION_FILE.exists():
+        args.extend(["--add-data", add_data_arg(VERSION_FILE)])
 
     if os.name == "nt":
         if not LOGO_ICO.exists():
