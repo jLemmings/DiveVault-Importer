@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -64,6 +66,47 @@ def collect_runtime_files(patterns: tuple[str, ...]) -> list[Path]:
     return sorted(files.values(), key=str)
 
 
+def build_linux_runtime_from_source() -> list[Path]:
+    runtime_dir = RUNTIME_DEPS_DIR / "linux"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    configure_cmd = [
+        "bash",
+        "configure",
+        "--without-libusb",
+        "--without-hidapi",
+        "--without-bluez",
+        "--disable-examples",
+        "--disable-doc",
+    ]
+    subprocess.run(
+        configure_cmd,
+        cwd=LIBDIVECOMPUTER_DIR,
+        check=True,
+    )
+    subprocess.run(
+        ["make", "-C", str(LIBDIVECOMPUTER_DIR / "src"), "-j2"],
+        check=True,
+    )
+
+    built_files = sorted((LIBDIVECOMPUTER_DIR / "src" / ".libs").glob("libdivecomputer.so*"))
+    if not built_files:
+        raise FileNotFoundError(
+            f"libdivecomputer source build completed but produced no shared libraries under "
+            f"{LIBDIVECOMPUTER_DIR / 'src' / '.libs'}"
+        )
+
+    copied: list[Path] = []
+    for path in built_files:
+        if not path.is_file():
+            continue
+        target = runtime_dir / path.name
+        shutil.copy2(path, target)
+        copied.append(target.resolve())
+
+    return copied
+
+
 def require_runtime_match(files: list[Path], expected: tuple[str, ...], description: str) -> None:
     if any(file.name.startswith(prefix) for file in files for prefix in expected):
         return
@@ -83,9 +126,9 @@ def bundled_runtime_binaries() -> list[str]:
         require_runtime_match(files, ("libhidapi-0.dll",), "hidapi runtime")
     elif sys.platform.startswith("linux"):
         files = collect_runtime_files(("*.so", "*.so.*"))
+        if not any(file.name.startswith("libdivecomputer.so") for file in files):
+            files = build_linux_runtime_from_source()
         require_runtime_match(files, ("libdivecomputer.so",), "libdivecomputer runtime")
-        require_runtime_match(files, ("libusb-",), "libusb runtime")
-        require_runtime_match(files, ("libhidapi-",), "hidapi runtime")
     else:
         files = []
 
