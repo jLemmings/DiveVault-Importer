@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import platform
-import subprocess
 import sys
 from pathlib import Path
 
@@ -13,11 +12,10 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRYPOINT = ROOT / "divevault-importer.py"
 DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
-BUILD_ASSETS_DIR = ROOT / ".pyinstaller-assets"
 LIBDIVECOMPUTER_DIR = ROOT / "libdivecomputer-0.9.0"
 RUNTIME_DEPS_DIR = ROOT / "libdivecomputer-0.9.0" / "runtime"
 LOGO_PNG = ROOT / "logo.png"
-LOGO_ICO = BUILD_ASSETS_DIR / "logo.ico"
+LOGO_ICO = ROOT / "logo.ico"
 SPEC_FILE = ROOT / "DiveSync.spec"
 
 
@@ -31,44 +29,6 @@ def add_binary_arg(source: Path, dest: str = ".") -> str:
 
 def add_data_arg(source: Path, dest: str = ".") -> str:
     return f"{source}{binary_separator()}{dest}"
-
-
-def convert_png_to_ico(source_png: Path, target_ico: Path) -> None:
-    script = """
-param([string]$src, [string]$dst)
-Add-Type -AssemblyName System.Drawing
-$bmp = [System.Drawing.Bitmap]::FromFile($src)
-try {
-    $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
-    try {
-        $stream = [System.IO.File]::Open($dst, [System.IO.FileMode]::Create)
-        try {
-            $icon.Save($stream)
-        } finally {
-            $stream.Close()
-        }
-    } finally {
-        $icon.Dispose()
-    }
-} finally {
-    $bmp.Dispose()
-}
-"""
-    subprocess.run(
-        ["powershell", "-NoProfile", "-Command", script, str(source_png), str(target_ico)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def ensure_windows_icon() -> Path:
-    if not LOGO_PNG.exists():
-        raise FileNotFoundError(f"Missing application icon source: {LOGO_PNG}")
-
-    BUILD_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-    convert_png_to_ico(LOGO_PNG, LOGO_ICO)
-    return LOGO_ICO
 
 
 def platform_runtime_dir() -> Path:
@@ -154,7 +114,9 @@ def pyinstaller_args() -> list[str]:
         args.extend(["--add-data", add_data_arg(LOGO_PNG)])
 
     if os.name == "nt":
-        args.extend(["--icon", str(ensure_windows_icon())])
+        if not LOGO_ICO.exists():
+            raise FileNotFoundError(f"Missing Windows application icon: {LOGO_ICO}")
+        args.extend(["--icon", str(LOGO_ICO)])
         for binary in bundled_runtime_binaries():
             args.extend(["--add-binary", binary])
     elif sys.platform.startswith("linux"):
@@ -167,7 +129,6 @@ def pyinstaller_args() -> list[str]:
 def main() -> None:
     DIST_DIR.mkdir(exist_ok=True)
     BUILD_DIR.mkdir(exist_ok=True)
-    BUILD_ASSETS_DIR.mkdir(exist_ok=True)
     if SPEC_FILE.exists():
         SPEC_FILE.unlink()
     print(f"Building GUI for {platform.system()} with Python {platform.python_version()}")
