@@ -81,6 +81,33 @@ def resource_dir() -> str:
     return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
 
+def load_app_version() -> str:
+    candidates = [
+        os.path.join(resource_dir(), "VERSION"),
+        os.path.join(executable_dir(), "VERSION"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION"),
+        os.path.join(os.getcwd(), "VERSION"),
+    ]
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = os.path.normcase(os.path.abspath(candidate))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, "r", encoding="utf-8") as handle:
+                version = handle.read().strip()
+        except OSError:
+            continue
+        if version:
+            return version
+
+    return "0.0.1"
+
+
 def vendored_runtime_dirs() -> list[str]:
     project_dir = os.path.dirname(os.path.abspath(__file__))
     libdivecomputer_root = os.path.join(project_dir, "libdivecomputer-0.9.0")
@@ -224,7 +251,7 @@ OFFICIAL_SUPPORTED_BRANDS = [
     "Zeagle",
 ]
 
-APP_VERSION = "v0.1.0"
+APP_VERSION = load_app_version()
 
 
 # ----------------------------
