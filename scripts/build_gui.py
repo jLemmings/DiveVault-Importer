@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import ctypes.util
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,12 +11,13 @@ import PyInstaller.__main__
 
 
 ROOT = Path(__file__).resolve().parent.parent
-ENTRYPOINT = ROOT / "mares_smart_air_sync.py"
+ENTRYPOINT = ROOT / "divevault-importer.py"
 DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
-BUILD_ASSETS_DIR = ROOT / ".pyinstaller-assets"
+LIBDIVECOMPUTER_DIR = ROOT / "libdivecomputer-0.9.0"
+RUNTIME_DEPS_DIR = ROOT / "libdivecomputer-0.9.0" / "runtime"
 LOGO_PNG = ROOT / "logo.png"
-LOGO_ICO = BUILD_ASSETS_DIR / "logo.ico"
+LOGO_ICO = ROOT / "logo.ico"
 SPEC_FILE = ROOT / "DiveSync.spec"
 
 
@@ -32,95 +33,106 @@ def add_data_arg(source: Path, dest: str = ".") -> str:
     return f"{source}{binary_separator()}{dest}"
 
 
-def convert_png_to_ico(source_png: Path, target_ico: Path) -> None:
-    script = """
-param([string]$src, [string]$dst)
-Add-Type -AssemblyName System.Drawing
-$bmp = [System.Drawing.Bitmap]::FromFile($src)
-try {
-    $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
-    try {
-        $stream = [System.IO.File]::Open($dst, [System.IO.FileMode]::Create)
-        try {
-            $icon.Save($stream)
-        } finally {
-            $stream.Close()
-        }
-    } finally {
-        $icon.Dispose()
-    }
-} finally {
-    $bmp.Dispose()
-}
-"""
-    subprocess.run(
-        ["powershell", "-NoProfile", "-Command", script, str(source_png), str(target_ico)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+def platform_runtime_dir() -> Path:
+    if os.name == "nt":
+        platform_name = "windows"
+    elif sys.platform.startswith("linux"):
+        platform_name = "linux"
+    else:
+        platform_name = "macos"
+    return RUNTIME_DEPS_DIR / platform_name
 
 
-def ensure_windows_icon() -> Path:
-    if not LOGO_PNG.exists():
-        raise FileNotFoundError(f"Missing application icon source: {LOGO_PNG}")
-
-    BUILD_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-    convert_png_to_ico(LOGO_PNG, LOGO_ICO)
-    return LOGO_ICO
-
-
-def windows_binaries() -> list[str]:
-    binaries = []
-    for name in ("libdivecomputer.dll", "libusb-1.0.dll", "libhidapi-0.dll"):
-        path = ROOT / name
-        if not path.exists():
-            raise FileNotFoundError(f"Missing required Windows runtime dependency: {path}")
-        binaries.append(add_binary_arg(path))
-    return binaries
+def candidate_dependency_roots() -> list[Path]:
+    runtime_dir = platform_runtime_dir()
+    roots = [runtime_dir]
+    platform_dir = LIBDIVECOMPUTER_DIR / runtime_dir.name
+    if platform_dir != runtime_dir:
+        roots.append(platform_dir)
+    roots.append(LIBDIVECOMPUTER_DIR)
+    return roots
 
 
-def locate_linux_library() -> Path:
-    discovered = ctypes.util.find_library("divecomputer")
-    candidates = [discovered] if discovered else []
-    candidates.extend(
-        [
-            "/lib/x86_64-linux-gnu/libdivecomputer.so.0",
-            "/usr/lib/x86_64-linux-gnu/libdivecomputer.so.0",
-            "/usr/local/lib/libdivecomputer.so.0",
-        ]
-    )
-
-    for candidate in candidates:
-        if not candidate:
+def collect_runtime_files(patterns: tuple[str, ...]) -> list[Path]:
+    files: dict[str, Path] = {}
+    for root in candidate_dependency_roots():
+        if not root.exists():
             continue
-        path = Path(candidate)
-        if not path.is_absolute():
-            resolved = subprocess.run(
-                ["bash", "-lc", f"ldconfig -p | awk '/{candidate}/ {{print $NF; exit}}'"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            if resolved:
-                path = Path(resolved)
-        if path.exists():
-            return path.resolve()
+        for pattern in patterns:
+            for path in sorted(root.rglob(pattern)):
+                if path.is_file():
+                    files[str(path.resolve())] = path.resolve()
 
-    raise FileNotFoundError("Could not locate libdivecomputer on this Linux runner.")
+    return sorted(files.values(), key=str)
 
 
-def linux_binaries() -> list[str]:
-    primary = locate_linux_library()
-    binaries = {primary}
-    ldd = subprocess.run(["ldd", str(primary)], check=True, capture_output=True, text=True).stdout
-    for line in ldd.splitlines():
-        parts = line.strip().split()
-        if len(parts) >= 3 and parts[1] == "=>" and parts[2].startswith("/"):
-            dependency = Path(parts[2]).resolve()
-            if dependency.name.startswith(("libusb-", "libhidapi-")):
-                binaries.add(dependency)
-    return [add_binary_arg(path) for path in sorted(binaries, key=str)]
+def build_linux_runtime_from_source() -> list[Path]:
+    runtime_dir = RUNTIME_DEPS_DIR / "linux"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    configure_cmd = [
+        "bash",
+        "configure",
+        "--without-libusb",
+        "--without-hidapi",
+        "--without-bluez",
+        "--disable-examples",
+        "--disable-doc",
+    ]
+    subprocess.run(
+        configure_cmd,
+        cwd=LIBDIVECOMPUTER_DIR,
+        check=True,
+    )
+    subprocess.run(
+        ["make", "-C", str(LIBDIVECOMPUTER_DIR / "src"), "-j2"],
+        check=True,
+    )
+
+    built_files = sorted((LIBDIVECOMPUTER_DIR / "src" / ".libs").glob("libdivecomputer.so*"))
+    if not built_files:
+        raise FileNotFoundError(
+            f"libdivecomputer source build completed but produced no shared libraries under "
+            f"{LIBDIVECOMPUTER_DIR / 'src' / '.libs'}"
+        )
+
+    copied: list[Path] = []
+    for path in built_files:
+        if not path.is_file():
+            continue
+        target = runtime_dir / path.name
+        shutil.copy2(path, target)
+        copied.append(target.resolve())
+
+    return copied
+
+
+def require_runtime_match(files: list[Path], expected: tuple[str, ...], description: str) -> None:
+    if any(file.name.startswith(prefix) for file in files for prefix in expected):
+        return
+    expected_names = ", ".join(expected)
+    searched = ", ".join(str(path) for path in candidate_dependency_roots())
+    raise FileNotFoundError(
+        f"Missing {description}. Expected a file starting with one of: {expected_names}. "
+        f"Searched under: {searched}"
+    )
+
+
+def bundled_runtime_binaries() -> list[str]:
+    if os.name == "nt":
+        files = collect_runtime_files(("*.dll",))
+        require_runtime_match(files, ("libdivecomputer.dll",), "libdivecomputer runtime")
+        require_runtime_match(files, ("libusb-1.0.dll",), "libusb runtime")
+        require_runtime_match(files, ("libhidapi-0.dll",), "hidapi runtime")
+    elif sys.platform.startswith("linux"):
+        files = collect_runtime_files(("*.so", "*.so.*"))
+        if not any(file.name.startswith("libdivecomputer.so") for file in files):
+            files = build_linux_runtime_from_source()
+        require_runtime_match(files, ("libdivecomputer.so",), "libdivecomputer runtime")
+    else:
+        files = []
+
+    return [add_binary_arg(path) for path in files]
 
 
 def pyinstaller_args() -> list[str]:
@@ -145,11 +157,13 @@ def pyinstaller_args() -> list[str]:
         args.extend(["--add-data", add_data_arg(LOGO_PNG)])
 
     if os.name == "nt":
-        args.extend(["--icon", str(ensure_windows_icon())])
-        for binary in windows_binaries():
+        if not LOGO_ICO.exists():
+            raise FileNotFoundError(f"Missing Windows application icon: {LOGO_ICO}")
+        args.extend(["--icon", str(LOGO_ICO)])
+        for binary in bundled_runtime_binaries():
             args.extend(["--add-binary", binary])
     elif sys.platform.startswith("linux"):
-        for binary in linux_binaries():
+        for binary in bundled_runtime_binaries():
             args.extend(["--add-binary", binary])
 
     return args
@@ -158,7 +172,6 @@ def pyinstaller_args() -> list[str]:
 def main() -> None:
     DIST_DIR.mkdir(exist_ok=True)
     BUILD_DIR.mkdir(exist_ok=True)
-    BUILD_ASSETS_DIR.mkdir(exist_ok=True)
     if SPEC_FILE.exists():
         SPEC_FILE.unlink()
     print(f"Building GUI for {platform.system()} with Python {platform.python_version()}")

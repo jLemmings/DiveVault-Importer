@@ -6,9 +6,9 @@ Tested logic-wise against the libdivecomputer v0.9.0 public headers/API layout,
 but you should still expect to do a little hardware-specific debugging the first time.
 
 Usage:
-    python mares_smart_air_sync.py --port COM3 --backend-url http://localhost:8000
-    python mares_smart_air_sync.py --port COM3 --backend-url http://localhost:8000 --backend-auth-token <desktop_sync_token_or_session_token>
-    python mares_smart_air_sync.py --gui
+    python divevault-importer.py --port COM3 --backend-url http://localhost:8000
+    python divevault-importer.py --port COM3 --backend-url http://localhost:8000 --backend-auth-token <desktop_sync_token_or_session_token>
+    python divevault-importer.py --gui
 
 Notes:
 - This example uses SERIAL transport (clip/cable). The Mares Smart Air also supports BLE,
@@ -81,6 +81,25 @@ def executable_dir() -> str:
 
 def resource_dir() -> str:
     return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+def vendored_runtime_dirs() -> list[str]:
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    libdivecomputer_root = os.path.join(project_dir, "libdivecomputer-0.9.0")
+    runtime_root = os.path.join(libdivecomputer_root, "runtime")
+    if os.name == "nt":
+        platform_name = "windows"
+    elif sys.platform == "darwin":
+        platform_name = "macos"
+    else:
+        platform_name = "linux"
+
+    return [
+        os.path.join(runtime_root, platform_name),
+        os.path.join(libdivecomputer_root, platform_name),
+        runtime_root,
+        libdivecomputer_root,
+    ]
 
 
 def set_windows_appusermodel_id() -> None:
@@ -390,7 +409,7 @@ def load_lib() -> ctypes.CDLL:
     else:
         library_names = ["libdivecomputer.so", "libdivecomputer.so.0"]
 
-    search_dirs = [resource_dir(), executable_dir(), os.getcwd()]
+    search_dirs = [resource_dir(), executable_dir(), os.getcwd(), *vendored_runtime_dirs()]
 
     if os.name == "nt" and hasattr(os, "add_dll_directory"):
         seen_dirs: set[str] = set()
@@ -400,6 +419,25 @@ def load_lib() -> ctypes.CDLL:
                 continue
             seen_dirs.add(normalized)
             _DLL_SEARCH_HANDLES.append(os.add_dll_directory(directory))
+    elif os.name != "nt":
+        seen_files: set[str] = set()
+        preload_mode = getattr(ctypes, "RTLD_GLOBAL", 0)
+        for directory in search_dirs:
+            if not os.path.isdir(directory):
+                continue
+            for name in os.listdir(directory):
+                if name in library_names:
+                    continue
+                if ".so" not in name and not name.endswith(".dylib"):
+                    continue
+                candidate = os.path.abspath(os.path.join(directory, name))
+                if candidate in seen_files or not os.path.isfile(candidate):
+                    continue
+                seen_files.add(candidate)
+                try:
+                    ctypes.CDLL(candidate, mode=preload_mode)
+                except OSError:
+                    continue
 
     tried_paths: list[str] = []
     for directory in search_dirs:
