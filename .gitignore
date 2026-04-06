@@ -1,5 +1,13 @@
 .venv/
+.vscode/
+.idea/
 __pycache__/
+*.py[cod]
+*.spec
+.pytest_cache/
+.ruff_cache/
 build/
 dist/
-*.spec
+vendor/
+Thumbs.db
+.DS_Store
