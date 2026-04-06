@@ -62,31 +62,40 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     list_ports = None
 
-from dotenv import load_dotenv
-
 
 _DLL_SEARCH_HANDLES: list[object] = []
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(PROJECT_DIR, "assets")
+LIBDIVECOMPUTER_DIR = os.path.join(PROJECT_DIR, "vendor", "libdivecomputer-0.9.0")
 
 
 def executable_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+    return PROJECT_DIR
 
 
 def resource_dir() -> str:
-    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return getattr(sys, "_MEIPASS", PROJECT_DIR)
+
+
+def source_path(*parts: str) -> str:
+    return os.path.join(PROJECT_DIR, *parts)
+
+
+def asset_path(filename: str) -> str:
+    return os.path.join(ASSETS_DIR, filename)
 
 
 def default_backend_url() -> str:
-    return os.getenv("BACKEND_URL") or "https://divevault.local.joshuahemmings.ch"
+    return "https://divevault.local.joshuahemmings.ch"
 
 
 def load_app_version() -> str:
     candidates = [
         os.path.join(resource_dir(), "VERSION"),
         os.path.join(executable_dir(), "VERSION"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION"),
+        source_path("VERSION"),
         os.path.join(os.getcwd(), "VERSION"),
     ]
 
@@ -158,8 +167,7 @@ def save_defaults(defaults: dict[str, str]) -> None:
 
 
 def vendored_runtime_dirs() -> list[str]:
-    project_dir = os.path.dirname(os.path.abspath(__file__))
-    libdivecomputer_root = os.path.join(project_dir, "libdivecomputer-0.9.0")
+    libdivecomputer_root = LIBDIVECOMPUTER_DIR
     runtime_root = os.path.join(libdivecomputer_root, "runtime")
     if os.name == "nt":
         platform_name = "windows"
@@ -194,33 +202,11 @@ def ensure_runtime_icon_path() -> str | None:
         if os.path.exists(executable_path):
             return executable_path
 
-    ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.ico")
-    if os.path.exists(ico_path):
-        return ico_path
+    for candidate in (asset_path("logo.ico"), source_path("logo.ico")):
+        if os.path.exists(candidate):
+            return candidate
 
     return None
-
-
-def load_optional_dotenv() -> None:
-    candidates = [
-        os.path.join(executable_dir(), ".env"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
-        os.path.join(os.getcwd(), ".env"),
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
-    ]
-
-    seen: set[str] = set()
-    for candidate in candidates:
-        normalized = os.path.normcase(os.path.abspath(candidate))
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        if os.path.exists(candidate):
-            load_dotenv(dotenv_path=candidate)
-            return
-
-
-load_optional_dotenv()
 
 
 # ----------------------------
@@ -483,31 +469,49 @@ def load_lib() -> ctypes.CDLL:
                     continue
 
     tried_paths: list[str] = []
+    load_errors: list[tuple[str, OSError]] = []
     for directory in search_dirs:
         for library_name in library_names:
             candidate = os.path.join(directory, library_name)
             tried_paths.append(candidate)
             if os.path.exists(candidate):
-                return ctypes.CDLL(candidate)
+                try:
+                    return ctypes.CDLL(candidate)
+                except OSError as exc:
+                    load_errors.append((candidate, exc))
 
     find_library_name = ctypes.util.find_library("divecomputer")
     if find_library_name:
         tried_paths.append(find_library_name)
         try:
             return ctypes.CDLL(find_library_name)
-        except OSError:
-            pass
+        except OSError as exc:
+            load_errors.append((find_library_name, exc))
 
     for library_name in library_names:
         tried_paths.append(library_name)
         try:
             return ctypes.CDLL(library_name)
-        except OSError:
+        except OSError as exc:
+            load_errors.append((library_name, exc))
             continue
+
+    load_hint = ""
+    if os.name == "nt":
+        for candidate, exc in load_errors:
+            if getattr(exc, "winerror", None) == 193:
+                load_hint = (
+                    "\nA Windows runtime dependency was found but could not be loaded: "
+                    f"{candidate}. Rebuild the local Windows runtime with "
+                    "`python scripts/fetch_libdivecomputer.py`."
+                )
+                break
 
     raise RuntimeError(
         "Could not load the libdivecomputer shared library.\n"
         "Make sure it is bundled with the app or installed on the system.\n"
+        "For local development, run `python scripts/fetch_libdivecomputer.py` first.\n"
+        f"{load_hint}\n"
         "Tried:\n- " + "\n- ".join(tried_paths)
     )
 
@@ -647,7 +651,7 @@ class BackendDiveStore:
             if exc.code in {401, 403}:
                 raise RuntimeError(
                     f"Backend authentication failed: {method} {url} -> {exc.code} {details}. "
-                    "Sign in through the desktop app or provide BACKEND_AUTH_TOKEN."
+                    "Sign in through the desktop app and retry."
                 ) from exc
             raise RuntimeError(f"Backend request failed: {method} {url} -> {exc.code} {details}") from exc
         except error.URLError as exc:
@@ -701,11 +705,6 @@ class BackendDiveStore:
 
     def close(self) -> None:
         return None
-
-
-def load_auth_token() -> str | None:
-    env_token = os.getenv("BACKEND_AUTH_TOKEN") or os.getenv("CLERK_SESSION_TOKEN")
-    return normalize_bearer_token(env_token)
 
 
 def normalize_bearer_token(token: str | None) -> str | None:
@@ -1351,7 +1350,7 @@ class SyncDesktopApp:
         self._configure_window_icon()
 
         self.events: Queue[tuple[str, object]] = Queue()
-        self.auth_token: str | None = load_auth_token()
+        self.auth_token: str | None = None
         self.auth_token_expires_at: int | None = None
         self.current_code: str | None = None
 
@@ -1364,7 +1363,7 @@ class SyncDesktopApp:
         self.port_var = tk.StringVar(value=defaults.get("port") or "")
         self.detected_device_var = tk.StringVar(value="Not detected")
         self.status_var = tk.StringVar(value="Ready. Sign in to the backend to start syncing.")
-        self.auth_var = tk.StringVar(value="Desktop sync token already loaded." if self.auth_token else "Not signed in")
+        self.auth_var = tk.StringVar(value="Not signed in")
         self.step1_var = tk.StringVar(value="Choose your dive computer model and scan for it.")
         self.step2_var = tk.StringVar(value="Sign in after a dive computer has been detected.")
         self.step3_var = tk.StringVar(value="Start sync after detection and backend login are complete.")
@@ -1396,11 +1395,18 @@ class SyncDesktopApp:
             self.root.after(250, self._apply_windows_titlebar_icon)
             return
 
-        icon_path = os.path.join(resource_dir(), "logo.png")
-        if os.path.exists(icon_path):
+        icon_candidates = [
+            os.path.join(resource_dir(), "logo.png"),
+            asset_path("logo.png"),
+            source_path("logo.png"),
+        ]
+        for icon_path in icon_candidates:
+            if not os.path.exists(icon_path):
+                continue
             try:
                 self._icon_image = tk.PhotoImage(file=icon_path)
                 self.root.iconphoto(True, self._icon_image)
+                break
             except tk.TclError:
                 self._icon_image = None
 
