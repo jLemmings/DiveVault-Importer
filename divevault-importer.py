@@ -301,6 +301,8 @@ OFFICIAL_SUPPORTED_BRANDS = [
 ]
 
 APP_VERSION = load_app_version()
+HEADER_LOGO_FILE = "Logo Transparent-02.png"
+ICON_LOGO_FILE = "Logo Transparent-03.png"
 
 
 # ----------------------------
@@ -1347,6 +1349,7 @@ class SyncDesktopApp:
         self.root.geometry("1180x820")
         self.root.resizable(False, False)
         self._icon_image: tk.PhotoImage | None = None
+        self._header_logo_image: tk.PhotoImage | None = None
         self._runtime_icon_path: str | None = None
         self._configure_window_icon()
 
@@ -1389,20 +1392,20 @@ class SyncDesktopApp:
         self.root.after(150, self._pump_events)
 
     def _configure_window_icon(self) -> None:
+        icon_path = os.path.join(resource_dir(), ICON_LOGO_FILE)
+        if os.path.exists(icon_path):
+            try:
+                self._icon_image = tk.PhotoImage(file=icon_path).subsample(64, 64)
+                self.root.iconphoto(True, self._icon_image)
+            except tk.TclError:
+                self._icon_image = None
+
         if os.name == "nt":
             self._runtime_icon_path = ensure_runtime_icon_path()
             self._apply_windows_titlebar_icon()
             self.root.after_idle(self._apply_windows_titlebar_icon)
             self.root.after(250, self._apply_windows_titlebar_icon)
             return
-
-        icon_path = os.path.join(resource_dir(), "logo.png")
-        if os.path.exists(icon_path):
-            try:
-                self._icon_image = tk.PhotoImage(file=icon_path)
-                self.root.iconphoto(True, self._icon_image)
-            except tk.TclError:
-                self._icon_image = None
 
     def _apply_windows_titlebar_icon(self) -> None:
         if os.name != "nt" or not self._runtime_icon_path:
@@ -1545,13 +1548,28 @@ class SyncDesktopApp:
         header = ttk.Frame(frame, style="Shell.TFrame")
         header.grid(row=0, column=0, columnspan=2, sticky="ew")
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="DIVEVAULT", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
+        header_logo_path = os.path.join(resource_dir(), HEADER_LOGO_FILE)
+        if os.path.exists(header_logo_path):
+            try:
+                self._header_logo_image = tk.PhotoImage(file=header_logo_path).subsample(28, 28)
+                tk.Label(
+                    header,
+                    image=self._header_logo_image,
+                    bg=self.colors["bg"],
+                    bd=0,
+                    highlightthickness=0,
+                ).grid(row=0, column=0, sticky="w")
+            except tk.TclError:
+                self._header_logo_image = None
+
+        if self._header_logo_image is None:
+            ttk.Label(header, text="DIVEVAULT", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             header,
             text="Upload Dive Entries to DiveVault.",
             style="Subtitle.TLabel",
             justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(0, 28))
+        ).grid(row=1, column=0, sticky="w", pady=(8, 28))
 
         step1_panel = ttk.Frame(frame, padding=24, style="Panel.TFrame")
         step1_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 18))

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Logo%20Transparent-02.png" alt="DiveVault" width="420">
+</p>
+
 # DiveVault Importer
 
 DiveVault Importer is a Python desktop importer for downloading dive logs from a supported dive computer and sending them to the DiveVault backend.
