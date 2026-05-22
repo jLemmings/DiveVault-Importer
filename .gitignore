@@ -1,10 +1,13 @@
 .venv/
+.vscode/
+.idea/
 __pycache__/
+*.py[cod]
+*.spec
+.pytest_cache/
+.ruff_cache/
 build/
 dist/
-*.spec
-# IDE
-*.iml
-.idea
-.vscode
 vendor/
+Thumbs.db
+.DS_Store
