@@ -19,7 +19,6 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRYPOINT = ROOT / "divevault-importer.py"
 DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
-<<<<<<< HEAD
 LIBDIVECOMPUTER_DIR = ROOT / "libdivecomputer-0.9.0"
 RUNTIME_DEPS_DIR = ROOT / "libdivecomputer-0.9.0" / "runtime"
 LOGO_DATA_FILES = (
@@ -27,12 +26,6 @@ LOGO_DATA_FILES = (
     ROOT / "Logo Transparent-03.png",
 )
 LOGO_ICO = ROOT / "logo.ico"
-=======
-RUNTIME_DEPS_DIR = LIBDIVECOMPUTER_DIR / "runtime"
-ASSETS_DIR = ROOT / "assets"
-LOGO_PNG = ASSETS_DIR / "logo.png"
-LOGO_ICO = ASSETS_DIR / "logo.ico"
->>>>>>> de93e0bb789e2c2adbbc094f7ffbab634453e275
 VERSION_FILE = ROOT / "VERSION"
 
 
