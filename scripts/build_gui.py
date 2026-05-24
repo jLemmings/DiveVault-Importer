@@ -22,9 +22,11 @@ BUILD_DIR = ROOT / "build"
 LIBDIVECOMPUTER_DIR = ROOT / "libdivecomputer-0.9.0"
 RUNTIME_DEPS_DIR = ROOT / "libdivecomputer-0.9.0" / "runtime"
 LOGO_DATA_FILES = (
-    ROOT / "Logo Transparent-02.png",
-    ROOT / "Logo Transparent-03.png",
+    (ROOT / "assets" / "logo.png", "assets"),
+    (ROOT / "assets" / "logo_header.png", "assets"),
+    (ROOT / "assets" / "logo_header_app.png", "assets"),
 )
+TRANSLATION_FILES = tuple((path, "translations") for path in (ROOT / "translations").glob("*.json"))
 LOGO_ICO = ROOT / "assets" / "logo.ico"
 VERSION_FILE = ROOT / "VERSION"
 
@@ -97,9 +99,12 @@ def pyinstaller_args() -> list[str]:
         str(ENTRYPOINT),
     ]
 
-    for logo_file in LOGO_DATA_FILES:
+    for logo_file, destination in LOGO_DATA_FILES:
         if logo_file.exists():
-            args.extend(["--add-data", add_data_arg(logo_file)])
+            args.extend(["--add-data", add_data_arg(logo_file, destination)])
+    for translation_file, destination in TRANSLATION_FILES:
+        if translation_file.exists():
+            args.extend(["--add-data", add_data_arg(translation_file, destination)])
     if VERSION_FILE.exists():
         args.extend(["--add-data", add_data_arg(VERSION_FILE)])
 
