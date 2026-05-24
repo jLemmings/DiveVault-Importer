@@ -25,7 +25,7 @@ LOGO_DATA_FILES = (
     ROOT / "Logo Transparent-02.png",
     ROOT / "Logo Transparent-03.png",
 )
-LOGO_ICO = ROOT / "logo.ico"
+LOGO_ICO = ROOT / "assets" / "logo.ico"
 VERSION_FILE = ROOT / "VERSION"
 
 
