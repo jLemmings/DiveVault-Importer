@@ -37,8 +37,10 @@ from ctypes import (
     cast,
 )
 import ctypes.util
+import builtins
 import hashlib
 import json
+import locale
 import sys
 import os
 import threading
@@ -85,6 +87,57 @@ def source_path(*parts: str) -> str:
 
 def asset_path(filename: str) -> str:
     return os.path.join(ASSETS_DIR, filename)
+
+
+def translation_candidates(language_code: str) -> list[str]:
+    filename = f"{language_code}.json"
+    return [
+        os.path.join(resource_dir(), "translations", filename),
+        source_path("translations", filename),
+    ]
+
+
+class JsonTranslations:
+    def __init__(self, language_code: str) -> None:
+        self.language_code = language_code
+        self.messages = self._load_messages(language_code)
+
+    def _load_messages(self, language_code: str) -> dict[str, str]:
+        for candidate in translation_candidates(language_code):
+            if not os.path.exists(candidate):
+                continue
+            try:
+                with open(candidate, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                return {str(key): str(value) for key, value in payload.items()}
+        return {}
+
+    def gettext(self, message: str) -> str:
+        return self.messages.get(message, message)
+
+
+def current_language_code() -> str:
+    configured_locale = locale.getlocale()[0] or os.getenv("LANG") or os.getenv("LC_ALL") or ""
+    language = configured_locale.split("_", 1)[0].split("-", 1)[0].lower()
+    return language if language in {"de", "fr"} else "en"
+
+
+def set_language(language_code: str) -> None:
+    global TRANSLATIONS, gettext, _
+    language = language_code if language_code in {"de", "fr", "en"} else "en"
+    TRANSLATIONS = JsonTranslations(language)
+    gettext = TRANSLATIONS.gettext
+    _ = gettext
+    builtins.__dict__["_"] = _
+
+
+TRANSLATIONS: JsonTranslations
+gettext: Callable[[str], str]
+_: Callable[[str], str]
+set_language(current_language_code())
 
 
 def default_backend_url() -> str:
@@ -147,7 +200,7 @@ def load_saved_defaults() -> dict[str, str]:
         return {}
 
     defaults: dict[str, str] = {}
-    for key in ("backend_url", "vendor", "product", "port"):
+    for key in ("backend_url", "vendor", "product", "port", "language"):
         value = payload.get(key)
         if isinstance(value, str):
             defaults[key] = value.strip()
@@ -157,11 +210,12 @@ def load_saved_defaults() -> dict[str, str]:
 def save_defaults(defaults: dict[str, str]) -> None:
     os.makedirs(settings_dir(), exist_ok=True)
     payload = {
-        "backend_url": defaults.get("backend_url", "").strip(),
-        "vendor": defaults.get("vendor", "").strip(),
-        "product": defaults.get("product", "").strip(),
-        "port": defaults.get("port", "").strip(),
-    }
+            "backend_url": defaults.get("backend_url", "").strip(),
+            "vendor": defaults.get("vendor", "").strip(),
+            "product": defaults.get("product", "").strip(),
+            "port": defaults.get("port", "").strip(),
+            "language": defaults.get("language", "").strip(),
+        }
     with open(settings_file_path(), "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
 
@@ -287,6 +341,7 @@ OFFICIAL_SUPPORTED_BRANDS = [
 ]
 
 APP_VERSION = load_app_version()
+ICON_LOGO_FILE = "logo.png"
 
 
 # ----------------------------
@@ -650,12 +705,28 @@ class BackendDiveStore:
             details = exc.read().decode("utf-8", errors="replace")
             if exc.code in {401, 403}:
                 raise RuntimeError(
-                    f"Backend authentication failed: {method} {url} -> {exc.code} {details}. "
-                    "Sign in through the desktop app and retry."
+                    _("Backend authentication failed: {method} {url} -> {code} {details}. Sign in through the desktop app and retry.").format(
+                        method=method,
+                        url=url,
+                        code=exc.code,
+                        details=details,
+                    )
                 ) from exc
-            raise RuntimeError(f"Backend request failed: {method} {url} -> {exc.code} {details}") from exc
+            raise RuntimeError(
+                _("Backend request failed: {method} {url} -> {code} {details}").format(
+                    method=method,
+                    url=url,
+                    code=exc.code,
+                    details=details,
+                )
+            ) from exc
         except error.URLError as exc:
-            raise RuntimeError(f"Could not reach backend at {self.base_url}: {exc.reason}") from exc
+            raise RuntimeError(
+                _("Could not reach backend at {url}: {reason}").format(
+                    url=self.base_url,
+                    reason=exc.reason,
+                )
+            ) from exc
 
         if not body:
             return {}
@@ -1340,12 +1411,21 @@ def sync_dives(
 
 
 class SyncDesktopApp:
+    LANGUAGE_OPTIONS = {
+        "English": "en",
+        "Deutsch": "de",
+        "Français": "fr",
+    }
+
     def __init__(self, root: tk.Tk, defaults: dict[str, str]) -> None:
         self.root = root
-        self.root.title("Dive Sync")
+        selected_language = defaults.get("language") or current_language_code()
+        set_language(selected_language)
+        self.root.title(_("Dive Sync"))
         self.root.geometry("1180x820")
         self.root.resizable(False, False)
         self._icon_image: tk.PhotoImage | None = None
+        self._header_logo_image: tk.PhotoImage | None = None
         self._runtime_icon_path: str | None = None
         self._configure_window_icon()
 
@@ -1361,12 +1441,13 @@ class SyncDesktopApp:
         self.vendor_var = tk.StringVar(value=default_vendor)
         self.product_var = tk.StringVar(value=default_product)
         self.port_var = tk.StringVar(value=defaults.get("port") or "")
-        self.detected_device_var = tk.StringVar(value="Not detected")
-        self.status_var = tk.StringVar(value="Ready. Sign in to the backend to start syncing.")
-        self.auth_var = tk.StringVar(value="Not signed in")
-        self.step1_var = tk.StringVar(value="Choose your dive computer model and scan for it.")
-        self.step2_var = tk.StringVar(value="Sign in after a dive computer has been detected.")
-        self.step3_var = tk.StringVar(value="Start sync after detection and backend login are complete.")
+        self.language_var = tk.StringVar(value=self._language_label(selected_language))
+        self.detected_device_var = tk.StringVar(value=_("Not detected"))
+        self.status_var = tk.StringVar(value=_("Ready. Sign in to the backend to start syncing."))
+        self.auth_var = tk.StringVar(value=_("Not signed in"))
+        self.step2_var = tk.StringVar(value=_("Sign in after a dive computer has been detected."))
+        self.step3_var = tk.StringVar(value=_("Start sync after detection and backend login are complete."))
+        self.sync_percent_var = tk.StringVar(value="0%")
         self.scan_in_progress = False
         self.login_in_progress = False
         self.sync_in_progress = False
@@ -1374,6 +1455,7 @@ class SyncDesktopApp:
         self.sync_skipped = 0
         self.sync_existing_total: int | None = None
         self.detected_devices_by_port: dict[str, dict[str, str]] = {}
+        self.last_status_message = ""
         self.ui_ready = False
 
         self._configure_theme()
@@ -1384,10 +1466,19 @@ class SyncDesktopApp:
         self.product_var.trace_add("write", self._handle_product_change)
         self.port_var.trace_add("write", self._handle_port_change)
         self.backend_url_var.trace_add("write", self._handle_backend_url_change)
+        self.language_var.trace_add("write", self._handle_language_change)
         self.ui_ready = True
         self.root.after(150, self._pump_events)
 
     def _configure_window_icon(self) -> None:
+        icon_path = self._first_existing_asset_path(ICON_LOGO_FILE)
+        if icon_path:
+            try:
+                self._icon_image = tk.PhotoImage(file=icon_path).subsample(64, 64)
+                self.root.iconphoto(True, self._icon_image)
+            except tk.TclError:
+                self._icon_image = None
+
         if os.name == "nt":
             self._runtime_icon_path = ensure_runtime_icon_path()
             self._apply_windows_titlebar_icon()
@@ -1396,7 +1487,6 @@ class SyncDesktopApp:
             return
 
         icon_candidates = [
-            os.path.join(resource_dir(), "logo.png"),
             asset_path("logo.png"),
             source_path("logo.png"),
         ]
@@ -1410,6 +1500,18 @@ class SyncDesktopApp:
             except tk.TclError:
                 self._icon_image = None
 
+    def _first_existing_asset_path(self, filename: str) -> str | None:
+        candidates = [
+            os.path.join(resource_dir(), "assets", filename),
+            os.path.join(resource_dir(), filename),
+            asset_path(filename),
+            source_path(filename),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
     def _apply_windows_titlebar_icon(self) -> None:
         if os.name != "nt" or not self._runtime_icon_path:
             return
@@ -1420,21 +1522,22 @@ class SyncDesktopApp:
 
     def _configure_theme(self) -> None:
         self.colors = {
-            "bg": "#071f31",
-            "panel": "#0b2840",
-            "panel_alt": "#173148",
-            "panel_muted": "#16324a",
-            "panel_dark": "#06192a",
-            "border": "#173752",
-            "text": "#d8e8ff",
-            "muted": "#8ea8c2",
-            "accent": "#8db8ef",
-            "accent_soft": "#253f59",
-            "accent_strong": "#92bdf1",
-            "divider": "#2a4762",
+            "bg": "#041724",
+            "panel": "#071d2d",
+            "panel_alt": "#092235",
+            "panel_muted": "#102c42",
+            "panel_dark": "#03111f",
+            "border": "#1c3a52",
+            "border_hot": "#0e6677",
+            "text": "#d9f8ff",
+            "muted": "#91a2b1",
+            "accent": "#75e8f6",
+            "accent_soft": "#15384e",
+            "accent_strong": "#18dce8",
+            "divider": "#10283b",
             "warning": "#ffbc79",
             "disabled": "#47627f",
-            "success": "#9cc8ff",
+            "success": "#75e8f6",
         }
         self.root.configure(bg=self.colors["bg"])
 
@@ -1446,19 +1549,23 @@ class SyncDesktopApp:
         self.root.option_add("*TCombobox*Listbox.Font", ("Segoe UI", 12))
 
         style.configure("Shell.TFrame", background=self.colors["bg"])
-        style.configure("Panel.TFrame", background=self.colors["panel"], borderwidth=0, relief="flat")
-        style.configure("PanelAlt.TFrame", background=self.colors["panel_alt"], borderwidth=0, relief="flat")
+        style.configure("Panel.TFrame", background=self.colors["panel"], borderwidth=1, relief="solid")
+        style.configure("PanelAlt.TFrame", background=self.colors["panel_alt"], borderwidth=1, relief="solid")
         style.configure("Stat.TFrame", background=self.colors["panel"])
         style.configure("Divider.TFrame", background=self.colors["divider"])
-        style.configure("Title.TLabel", background=self.colors["bg"], foreground=self.colors["accent"], font=("Segoe UI Semibold", 42))
-        style.configure("Brand.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI Semibold", 18))
-        style.configure("Subtitle.TLabel", background=self.colors["bg"], foreground="#c7d7ea", font=("Segoe UI", 15))
-        style.configure("Section.TLabel", background=self.colors["panel"], foreground=self.colors["text"], font=("Segoe UI Semibold", 17))
-        style.configure("SectionAlt.TLabel", background=self.colors["panel_alt"], foreground=self.colors["text"], font=("Segoe UI Semibold", 17))
-        style.configure("Field.TLabel", background=self.colors["panel"], foreground=self.colors["muted"], font=("Consolas", 10))
-        style.configure("FieldAlt.TLabel", background=self.colors["panel_alt"], foreground=self.colors["muted"], font=("Consolas", 10))
+        style.configure("Title.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI Black", 34))
+        style.configure("Subtitle.TLabel", background=self.colors["bg"], foreground="#c5d1d9", font=("Segoe UI", 13))
+        style.configure("StepNumber.TLabel", background=self.colors["panel"], foreground=self.colors["accent"], font=("Consolas", 32, "bold"))
+        style.configure("StepNumberAlt.TLabel", background=self.colors["panel_alt"], foreground=self.colors["accent"], font=("Consolas", 32, "bold"))
+        style.configure("Section.TLabel", background=self.colors["panel"], foreground=self.colors["text"], font=("Segoe UI Semibold", 25))
+        style.configure("SectionAlt.TLabel", background=self.colors["panel_alt"], foreground=self.colors["text"], font=("Segoe UI Semibold", 25))
+        style.configure("Field.TLabel", background=self.colors["panel"], foreground=self.colors["muted"], font=("Consolas", 10, "bold"))
+        style.configure("FieldAlt.TLabel", background=self.colors["panel_alt"], foreground=self.colors["muted"], font=("Consolas", 10, "bold"))
         style.configure("Body.TLabel", background=self.colors["panel_alt"], foreground=self.colors["text"], font=("Segoe UI", 12))
         style.configure("Muted.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Consolas", 10))
+        style.configure("MutedPanel.TLabel", background=self.colors["panel"], foreground=self.colors["muted"], font=("Segoe UI", 11))
+        style.configure("MutedPanelAlt.TLabel", background=self.colors["panel_alt"], foreground=self.colors["muted"], font=("Segoe UI", 11))
+        style.configure("Progress.TLabel", background=self.colors["panel"], foreground=self.colors["accent_strong"], font=("Segoe UI Semibold", 24))
         style.configure("Status.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Segoe UI", 10))
         style.configure("MetricTitle.TLabel", background=self.colors["panel"], foreground=self.colors["muted"], font=("Consolas", 9))
         style.configure("MetricValue.TLabel", background=self.colors["panel"], foreground=self.colors["accent"], font=("Segoe UI Light", 18))
@@ -1472,7 +1579,7 @@ class SyncDesktopApp:
             lightcolor=self.colors["panel_muted"],
             darkcolor=self.colors["panel_muted"],
             arrowsize=18,
-            padding=(14, 12),
+            padding=(16, 12),
         )
         style.map(
             "Dive.TCombobox",
@@ -1491,7 +1598,7 @@ class SyncDesktopApp:
             bordercolor=self.colors["panel_dark"],
             lightcolor=self.colors["panel_dark"],
             darkcolor=self.colors["panel_dark"],
-            padding=(14, 12),
+            padding=(16, 12),
         )
         style.map(
             "Dive.TEntry",
@@ -1507,7 +1614,7 @@ class SyncDesktopApp:
             bordercolor=self.colors["panel_dark"],
             lightcolor=self.colors["panel_dark"],
             darkcolor=self.colors["panel_dark"],
-            padding=(14, 12),
+            padding=(16, 12),
         )
         style.configure(
             "Primary.TButton",
@@ -1518,7 +1625,7 @@ class SyncDesktopApp:
             bordercolor=self.colors["accent_strong"],
             lightcolor=self.colors["accent_strong"],
             darkcolor=self.colors["accent_strong"],
-            padding=(18, 14),
+            padding=(16, 14),
         )
         style.map(
             "Primary.TButton",
@@ -1528,13 +1635,13 @@ class SyncDesktopApp:
         style.configure(
             "Secondary.TButton",
             font=("Consolas", 11, "bold"),
-            foreground=self.colors["text"],
-            background=self.colors["accent_soft"],
+            foreground=self.colors["accent"],
+            background=self.colors["panel_muted"],
             borderwidth=0,
             bordercolor=self.colors["accent_soft"],
             lightcolor=self.colors["accent_soft"],
             darkcolor=self.colors["accent_soft"],
-            padding=(16, 12),
+            padding=(16, 14),
         )
         style.map(
             "Secondary.TButton",
@@ -1543,47 +1650,42 @@ class SyncDesktopApp:
         )
 
     def _build_ui(self) -> None:
-        frame = ttk.Frame(self.root, padding=(28, 26, 28, 20), style="Shell.TFrame")
+        frame = ttk.Frame(self.root, padding=(46, 20, 46, 18), style="Shell.TFrame")
         frame.pack(fill="both", expand=True)
-        frame.columnconfigure(0, weight=3)
-        frame.columnconfigure(1, weight=2)
+        for column in range(3):
+            frame.columnconfigure(column, weight=1, uniform="workflow")
+        frame.rowconfigure(1, weight=1)
 
         header = ttk.Frame(frame, style="Shell.TFrame")
-        header.grid(row=0, column=0, columnspan=2, sticky="ew")
+        header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 22))
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="DIVEVAULT", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            header,
-            text="Upload Dive Entries to DiveVault.",
-            style="Subtitle.TLabel",
-            justify="left",
-        ).grid(row=2, column=0, sticky="w", pady=(0, 28))
+        header_logo_path = self._first_existing_asset_path("logo_header_app.png") or self._first_existing_asset_path("logo_header.png")
+        if header_logo_path:
+            try:
+                self._header_logo_image = tk.PhotoImage(file=header_logo_path)
+                tk.Label(
+                    header,
+                    image=self._header_logo_image,
+                    bg=self.colors["bg"],
+                    bd=0,
+                    highlightthickness=0,
+                ).grid(row=0, column=0)
+            except tk.TclError:
+                self._header_logo_image = None
 
-        step1_panel = ttk.Frame(frame, padding=24, style="Panel.TFrame")
-        step1_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 18))
+        step1_panel = ttk.Frame(frame, padding=(30, 24), style="Panel.TFrame")
+        step1_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
         step1_panel.columnconfigure(0, weight=1)
-        step1_panel.columnconfigure(1, weight=1)
-        header1 = ttk.Frame(step1_panel, style="Panel.TFrame")
-        header1.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 20))
-        header1.columnconfigure(0, weight=1)
-        ttk.Label(header1, text="1. Connect Dive Computer", style="Section.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Frame(header1, style="Divider.TFrame", height=1).grid(row=1, column=0, sticky="ew", pady=(10, 0), padx=(0, 18))
-        self.detect_badge = tk.Label(
-            header1,
-            text="DIVE_COMPUTER_NOT_DETECTED",
-            bg=self.colors["accent_soft"],
-            fg=self.colors["muted"],
-            font=("Consolas", 10, "bold"),
-            padx=16,
-            pady=9,
-            bd=0,
-        )
-        self.detect_badge.grid(row=0, column=1, rowspan=2, sticky="e")
-        ttk.Label(step1_panel, textvariable=self.step1_var, style="Muted.TLabel", wraplength=560).grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(0, 18)
+        step1_panel.rowconfigure(8, weight=1)
+        ttk.Label(step1_panel, text="01", style="StepNumber.TLabel").grid(row=0, column=0, sticky="w")
+        self.detect_badge = None
+        self.connect_header_label = ttk.Label(step1_panel, text=_("Connect Hardware"), style="Section.TLabel", wraplength=280)
+        self.connect_header_label.grid(
+            row=1, column=0, sticky="w", pady=(24, 22)
         )
 
-        ttk.Label(step1_panel, text="BRAND", style="Field.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        self.brand_label = ttk.Label(step1_panel, text=_("BRAND"), style="Field.TLabel")
+        self.brand_label.grid(row=2, column=0, sticky="w", pady=(0, 8))
         self.vendor_combo = ttk.Combobox(
             step1_panel,
             textvariable=self.vendor_var,
@@ -1591,104 +1693,153 @@ class SyncDesktopApp:
             state="readonly",
             style="Dive.TCombobox",
         )
-        self.vendor_combo.grid(row=3, column=0, sticky="ew", pady=(0, 18), padx=(0, 14))
+        self.vendor_combo.grid(row=3, column=0, sticky="ew", pady=(0, 22))
 
-        ttk.Label(step1_panel, text="MODEL", style="Field.TLabel").grid(row=2, column=1, sticky="w", pady=(0, 6))
+        self.model_label = ttk.Label(step1_panel, text=_("MODEL"), style="Field.TLabel")
+        self.model_label.grid(row=4, column=0, sticky="w", pady=(0, 8))
         self.product_combo = ttk.Combobox(step1_panel, textvariable=self.product_var, values=[], state="readonly", style="Dive.TCombobox")
-        self.product_combo.grid(row=3, column=1, sticky="ew", pady=(0, 18))
+        self.product_combo.grid(row=5, column=0, sticky="ew", pady=(0, 22))
 
-        ttk.Label(step1_panel, text="SERIAL PORT", style="Field.TLabel").grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.port_selector_label = ttk.Label(step1_panel, text=_("PORT SELECTOR"), style="Field.TLabel")
+        self.port_selector_label.grid(row=6, column=0, sticky="w", pady=(0, 8))
         self.port_combo = ttk.Combobox(step1_panel, textvariable=self.port_var, values=[], state="readonly", style="Dive.TCombobox")
-        self.port_combo.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 18))
+        self.port_combo.grid(row=7, column=0, sticky="ew", pady=(0, 14))
 
-        self.scan_button = ttk.Button(step1_panel, text="Scan for Dive Computer", command=self.refresh_ports, style="Secondary.TButton")
-        self.scan_button.grid(row=6, column=0, sticky="w", pady=(0, 22))
+        self.scan_button = ttk.Button(step1_panel, text=_("SCAN FOR DEVICE"), command=self.refresh_ports, style="Secondary.TButton")
+        self.scan_button.grid(row=9, column=0, sticky="ew")
 
-        ttk.Label(step1_panel, text="Detected Dive Computer", style="Field.TLabel").grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        ttk.Entry(step1_panel, textvariable=self.detected_device_var, state="readonly", style="Dive.TEntry").grid(
-            row=8, column=0, columnspan=2, sticky="ew"
-        )
-
-        step2_panel = ttk.Frame(frame, padding=24, style="PanelAlt.TFrame")
-        step2_panel.grid(row=1, column=1, sticky="nsew")
+        step2_panel = ttk.Frame(frame, padding=(30, 24), style="PanelAlt.TFrame")
+        step2_panel.grid(row=1, column=1, sticky="nsew", padx=8)
         step2_panel.columnconfigure(0, weight=1)
-        header2 = ttk.Frame(step2_panel, style="PanelAlt.TFrame")
-        header2.grid(row=0, column=0, sticky="ew", pady=(0, 18))
-        header2.columnconfigure(0, weight=1)
-        ttk.Label(header2, text="2. Authentication", style="SectionAlt.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Frame(header2, style="Divider.TFrame", height=1).grid(row=1, column=0, sticky="ew", pady=(10, 0), padx=(0, 28))
-        self.auth_badge = tk.Label(
-            header2,
-            text="NOT_AUTHENTICATED",
-            bg=self.colors["panel_alt"],
-            fg=self.colors["warning"],
-            font=("Consolas", 10, "bold"),
-            padx=4,
-            pady=2,
-            bd=0,
-        )
-        self.auth_badge.grid(row=1, column=0, sticky="w", pady=(14, 0))
-        ttk.Label(step2_panel, text="URL", style="FieldAlt.TLabel").grid(row=2, column=0, sticky="w", pady=(18, 6))
+        step2_panel.rowconfigure(5, weight=1)
+        ttk.Label(step2_panel, text="02", style="StepNumberAlt.TLabel").grid(row=0, column=0, sticky="w")
+        self.auth_badge = None
+        self.vault_header_label = ttk.Label(step2_panel, text=_("Vault Access"), style="SectionAlt.TLabel")
+        self.vault_header_label.grid(row=1, column=0, sticky="w", pady=(24, 48))
+        self.vault_url_label = ttk.Label(step2_panel, text=_("VAULT SERVER URL"), style="FieldAlt.TLabel")
+        self.vault_url_label.grid(row=3, column=0, sticky="w", pady=(0, 8))
         self.backend_url_entry = ttk.Entry(step2_panel, textvariable=self.backend_url_var, style="Dark.TEntry")
-        self.backend_url_entry.grid(row=3, column=0, sticky="ew")
-        auth_note = tk.Frame(step2_panel, bg=self.colors["panel_dark"], bd=0, highlightthickness=0)
-        auth_note.grid(row=4, column=0, sticky="ew", pady=(20, 20))
-        tk.Frame(auth_note, bg="#8f6d58", width=2).pack(side="left", fill="y")
-        tk.Label(
-            auth_note,
-            text="Authentication is required to synchronize localized dive\ntelemetry with the primary cloud server.",
-            bg=self.colors["panel_dark"],
-            fg=self.colors["text"],
-            justify="left",
-            font=("Segoe UI", 12),
-            padx=16,
-            pady=16,
-        ).pack(anchor="w")
-        ttk.Label(step2_panel, textvariable=self.step2_var, style="Body.TLabel", wraplength=420, justify="left").grid(
-            row=5, column=0, sticky="w", pady=(0, 18)
+        self.backend_url_entry.grid(row=4, column=0, sticky="ew")
+        ttk.Label(step2_panel, textvariable=self.step2_var, style="MutedPanelAlt.TLabel", wraplength=300, justify="left").grid(
+            row=5, column=0, sticky="sw", pady=(18, 20)
         )
-        self.login_button = ttk.Button(step2_panel, text="Sign In", command=self.start_login, style="Primary.TButton")
+        self.login_button = ttk.Button(step2_panel, text=_("SIGN IN"), command=self.start_login, style="Secondary.TButton")
         self.login_button.grid(row=6, column=0, sticky="ew")
-
-        step3_panel = ttk.Frame(frame, padding=24, style="Panel.TFrame")
-        step3_panel.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(18, 18))
-        step3_panel.columnconfigure(0, weight=0)
-        step3_panel.columnconfigure(1, weight=1)
-        step3_panel.columnconfigure(2, weight=0)
-        step3_panel.columnconfigure(3, weight=0)
-        sync_icon = tk.Label(
-            step3_panel,
-            text="\u27f3",
-            bg=self.colors["accent_soft"],
-            fg=self.colors["muted"],
-            font=("Segoe UI Symbol", 27),
-            width=3,
-            height=2,
+        self.step2_overlay = tk.Frame(step2_panel, bg="#59636c", bd=0, highlightthickness=1, highlightbackground="#7b8790")
+        self.step2_overlay_label = tk.Label(
+            self.step2_overlay,
+            text=_("Complete Step 1 before continuing."),
+            bg="#59636c",
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 16),
+            justify="center",
+            wraplength=250,
             bd=0,
+            padx=18,
+            pady=14,
         )
-        sync_icon.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 18))
-        ttk.Label(step3_panel, text="3. Sync", style="Section.TLabel").grid(row=0, column=1, pady=(10, 0), sticky="w")
-        ttk.Label(step3_panel, textvariable=self.step3_var, style="Muted.TLabel", wraplength=520).grid(row=1, column=1, sticky="w")
-        self.close_button = ttk.Button(step3_panel, text="Close", command=self.root.destroy, style="Secondary.TButton")
-        self.close_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(18, 12))
-        self.sync_button = ttk.Button(step3_panel, text="Sync", command=self.start_sync, style="Primary.TButton")
-        self.sync_button.grid(row=0, column=3, rowspan=2, sticky="e")
+        self.step2_overlay_label.pack()
+
+        step3_panel = ttk.Frame(frame, padding=(30, 24), style="Panel.TFrame")
+        step3_panel.grid(row=1, column=2, sticky="nsew", padx=(16, 0))
+        step3_panel.columnconfigure(0, weight=1)
+        step3_panel.rowconfigure(6, weight=1)
+        ttk.Label(step3_panel, text="03", style="StepNumber.TLabel").grid(row=0, column=0, sticky="w")
+        self.sync_header_label = ttk.Label(step3_panel, text=_("Initialize Sync"), style="Section.TLabel")
+        self.sync_header_label.grid(row=1, column=0, sticky="w", pady=(24, 34))
+        progress_holder = tk.Frame(step3_panel, bg=self.colors["panel"], width=154, height=154)
+        progress_holder.grid(row=2, column=0, pady=(0, 28))
+        progress_holder.grid_propagate(False)
+        self.progress_canvas = tk.Canvas(progress_holder, width=154, height=154, bg=self.colors["panel"], highlightthickness=0, bd=0)
+        self.progress_canvas.place(x=0, y=0)
+        self.progress_canvas.create_oval(12, 12, 142, 142, outline=self.colors["border"], width=4)
+        self.progress_canvas.create_text(77, 60, text="\u224b", fill=self.colors["accent_strong"], font=("Segoe UI Symbol", 26, "bold"))
+        self.sync_percent_text = self.progress_canvas.create_text(
+            77,
+            94,
+            text=self.sync_percent_var.get(),
+            fill=self.colors["accent_strong"],
+            font=("Segoe UI", 22, "bold"),
+        )
+        ttk.Label(step3_panel, textvariable=self.step3_var, style="MutedPanel.TLabel", wraplength=300, justify="left").grid(
+            row=3, column=0, sticky="ew", pady=(0, 20)
+        )
+        self.sync_button = ttk.Button(step3_panel, text=_("START SYNCHRONIZATION"), command=self.start_sync, style="Primary.TButton")
+        self.sync_button.grid(row=7, column=0, sticky="ew")
+        self.step3_overlay = tk.Frame(step3_panel, bg="#59636c", bd=0, highlightthickness=1, highlightbackground="#7b8790")
+        self.step3_overlay_label = tk.Label(
+            self.step3_overlay,
+            text=_("Complete Steps 1 and 2 before continuing."),
+            bg="#59636c",
+            fg=self.colors["text"],
+            font=("Segoe UI Semibold", 16),
+            justify="center",
+            wraplength=250,
+            bd=0,
+            padx=18,
+            pady=14,
+        )
+        self.step3_overlay_label.pack()
 
         status_row = ttk.Frame(frame, style="Shell.TFrame")
-        status_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        status_row.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(18, 0))
         status_row.columnconfigure(0, weight=1)
-        ttk.Label(status_row, text=f"Version {APP_VERSION}", style="Status.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(status_row, textvariable=self.status_var, style="Status.TLabel", wraplength=960).grid(row=0, column=1, sticky="e")
+        status_row.columnconfigure(1, weight=2)
+        status_row.columnconfigure(2, weight=1)
+        self.copyright_label = ttk.Label(status_row, text=_("\u00a9 2026 DiveVault"), style="Status.TLabel")
+        self.copyright_label.grid(row=0, column=0, sticky="w")
+        language_box = ttk.Frame(status_row, style="Shell.TFrame")
+        language_box.grid(row=0, column=2, sticky="e")
+        self.language_label = ttk.Label(language_box, text=_("LANGUAGE"), style="Status.TLabel")
+        self.language_label.pack(side="left", padx=(0, 10))
+        self.language_combo = ttk.Combobox(
+            language_box,
+            textvariable=self.language_var,
+            values=list(self.LANGUAGE_OPTIONS.keys()),
+            state="readonly",
+            width=12,
+            style="Dive.TCombobox",
+        )
+        self.language_combo.pack(side="left")
 
         self.log_text = None
 
     def log(self, message: str) -> None:
+        self.last_status_message = message
         self.status_var.set(message)
         if self.log_text is not None:
             self.log_text.configure(state="normal")
             self.log_text.insert("end", f"{message}\n")
             self.log_text.see("end")
             self.log_text.configure(state="disabled")
+
+    def _language_label(self, language_code: str) -> str:
+        for label, code in self.LANGUAGE_OPTIONS.items():
+            if code == language_code:
+                return label
+        return "English"
+
+    def _selected_language_code(self) -> str:
+        return self.LANGUAGE_OPTIONS.get(self.language_var.get(), "en")
+
+    def _refresh_static_text(self) -> None:
+        self.root.title(_("Dive Sync"))
+        self.connect_header_label.configure(text=_("Connect Hardware"))
+        self.brand_label.configure(text=_("BRAND"))
+        self.model_label.configure(text=_("MODEL"))
+        self.port_selector_label.configure(text=_("PORT SELECTOR"))
+        self.scan_button.configure(text=_("SCAN FOR DEVICE"))
+        self.vault_header_label.configure(text=_("Vault Access"))
+        self.vault_url_label.configure(text=_("VAULT SERVER URL"))
+        self.login_button.configure(text=_("SIGN IN"))
+        self.sync_header_label.configure(text=_("Initialize Sync"))
+        self.sync_button.configure(text=_("START SYNCHRONIZATION"))
+        self.copyright_label.configure(text=_("\u00a9 2026 DiveVault"))
+        self.language_label.configure(text=_("LANGUAGE"))
+        self.step2_overlay_label.configure(text=_("Complete Step 1 before continuing."))
+        if not self._has_detected_device():
+            self.detected_device_var.set(_("Not detected"))
+        self._update_ui_state()
 
     def _persist_defaults(self) -> None:
         try:
@@ -1698,10 +1849,18 @@ class SyncDesktopApp:
                     "vendor": self.vendor_var.get(),
                     "product": self.product_var.get(),
                     "port": self.port_var.get(),
+                    "language": self._selected_language_code(),
                 }
             )
         except OSError:
             return
+
+    def _handle_language_change(self, *_args) -> None:
+        if not self.ui_ready:
+            return
+        set_language(self._selected_language_code())
+        self._refresh_static_text()
+        self._persist_defaults()
 
     def _handle_backend_url_change(self, *_args) -> None:
         if not self.ui_ready:
@@ -1731,7 +1890,7 @@ class SyncDesktopApp:
         self.detected_devices_by_port = {}
         self.port_combo["values"] = []
         self.port_var.set("")
-        self.detected_device_var.set("Not detected")
+        self.detected_device_var.set(_("Not detected"))
         self._update_ui_state()
 
     def _sync_model_options(self) -> None:
@@ -1746,7 +1905,7 @@ class SyncDesktopApp:
         current_port = self.port_var.get().strip()
         detection = self.detected_devices_by_port.get(current_port)
         if detection is None:
-            self.detected_device_var.set("Not detected")
+            self.detected_device_var.set(_("Not detected"))
         else:
             self.detected_device_var.set(detection["label"])
         self._update_ui_state()
@@ -1760,75 +1919,64 @@ class SyncDesktopApp:
         step1_complete = self._has_detected_device()
         step2_complete = bool(self.auth_token)
 
-        if self.scan_in_progress:
-            self.step1_var.set("Scanning serial ports for the selected dive computer...")
-        elif step1_complete:
-            self.step1_var.set("Dive computer detected. Continue to backend login.")
-        else:
-            self.step1_var.set("Choose your dive computer model and scan until it is detected on a COM port.")
-
         if self.login_in_progress:
-            self.step2_var.set("Browser login in progress. Finish approval in the opened browser tab.")
+            self.step2_var.set(_("Browser login in progress. Finish approval in the opened browser tab."))
         elif step2_complete:
-            self.step2_var.set("Backend login completed. You can start the sync.")
+            self.step2_var.set(_("Backend login completed. You can start the sync."))
         elif step1_complete:
-            self.step2_var.set("Dive computer detected. Sign in to the backend to continue.")
+            self.step2_var.set(_("Dive computer detected. Sign in to the backend to continue."))
         else:
-            self.step2_var.set("Complete Step 1 before backend login is enabled.")
+            self.step2_var.set(_("Complete Step 1 before backend login is enabled."))
 
         if self.sync_in_progress:
             if self.sync_imported or self.sync_skipped:
                 self.step3_var.set(
-                    f"Sync in progress. {self.sync_imported} dives synced, {self.sync_skipped} already present."
+                    _("Sync in progress. {imported} dives synced, {skipped} already present.").format(
+                        imported=self.sync_imported,
+                        skipped=self.sync_skipped,
+                    )
                 )
             else:
-                self.step3_var.set("Sync in progress. 0 dives synced.")
+                self.step3_var.set(_("Sync in progress. 0 dives synced."))
         elif self.sync_existing_total is not None and self.sync_imported == 0 and self.sync_skipped == 0:
-            self.step3_var.set(f"No new dives to sync. {self.sync_existing_total} dives already present in the backend.")
+            self.step3_var.set(
+                _("No new dives to sync. {total} dives already present in the backend.").format(
+                    total=self.sync_existing_total
+                )
+            )
         elif step1_complete and step2_complete:
-            self.step3_var.set("Detection and login are complete. Start the sync when ready.")
+            self.step3_var.set(_("Detection and login are complete. Start the sync when ready."))
         elif step1_complete:
-            self.step3_var.set("Complete backend login before starting the sync.")
+            self.step3_var.set(_("Complete backend login before starting the sync."))
         else:
-            self.step3_var.set("Complete Steps 1 and 2 before starting the sync.")
+            self.step3_var.set(_("Complete Steps 1 and 2 before starting the sync."))
 
-        if self.scan_in_progress:
-            self.detect_badge.configure(
-                text="SCANNING_PORTS",
-                bg=self.colors["accent_soft"],
-                fg=self.colors["accent"],
-            )
-        elif step1_complete:
-            self.detect_badge.configure(
-                text="DIVE_COMPUTER_DETECTED",
-                bg=self.colors["accent_soft"],
-                fg=self.colors["success"],
-            )
+        if self.sync_in_progress:
+            self.sync_percent_var.set("0%")
+        elif step1_complete and step2_complete and (self.sync_imported or self.sync_skipped):
+            self.sync_percent_var.set("100%")
         else:
-            self.detect_badge.configure(
-                text="AWAITING_DEVICE",
-                bg=self.colors["accent_soft"],
-                fg=self.colors["muted"],
-            )
+            self.sync_percent_var.set("0%")
+        if hasattr(self, "progress_canvas") and hasattr(self, "sync_percent_text"):
+            self.progress_canvas.itemconfigure(self.sync_percent_text, text=self.sync_percent_var.get())
 
-        if self.login_in_progress:
-            self.auth_badge.configure(
-                text="AUTH_IN_PROGRESS",
-                bg=self.colors["panel_alt"],
-                fg=self.colors["accent"],
-            )
-        elif step2_complete:
-            self.auth_badge.configure(
-                text="AUTHENTICATED",
-                bg=self.colors["panel_alt"],
-                fg=self.colors["success"],
-            )
+        if step1_complete:
+            self.step2_overlay.place_forget()
         else:
-            self.auth_badge.configure(
-                text="NOT_AUTHENTICATED",
-                bg=self.colors["panel_alt"],
-                fg=self.colors["warning"],
-            )
+            self.step2_overlay_label.configure(text=_("Complete Step 1 before continuing."))
+            self.step2_overlay.place(relx=0.5, rely=0.5, anchor="center")
+            self.step2_overlay.lift()
+
+        if step1_complete and step2_complete:
+            self.step3_overlay.place_forget()
+        else:
+            if step1_complete:
+                overlay_text = _("Complete Step 2 before continuing.")
+            else:
+                overlay_text = _("Complete Steps 1 and 2 before continuing.")
+            self.step3_overlay_label.configure(text=overlay_text)
+            self.step3_overlay.place(relx=0.5, rely=0.5, anchor="center")
+            self.step3_overlay.lift()
 
         self.vendor_combo.configure(state="readonly" if not self.scan_in_progress else "disabled")
         self.product_combo.configure(state="readonly" if not self.scan_in_progress else "disabled")
@@ -1842,18 +1990,22 @@ class SyncDesktopApp:
 
     def refresh_ports(self) -> None:
         if self.scan_in_progress:
-            self.log("Serial port scan already in progress.")
+            self.log(_("Serial port scan already in progress."))
             return
 
         vendor = self.vendor_var.get().strip()
         product = self.product_var.get().strip()
         if not vendor or not product:
-            self.log("Choose a brand and model before scanning.")
+            self.log(_("Choose a brand and model before scanning."))
             return
 
         self.scan_in_progress = True
-        self.detected_device_var.set("Scanning...")
-        self.log(f"Scanning serial ports for {format_dive_computer_name(vendor, product)}...")
+        self.detected_device_var.set(_("Scanning..."))
+        self.log(
+            _("Scanning serial ports for {device}...").format(
+                device=format_dive_computer_name(vendor, product)
+            )
+        )
         self._update_ui_state()
         thread = threading.Thread(target=self._scan_ports_worker, args=(vendor, product), daemon=True)
         thread.start()
@@ -1894,12 +2046,12 @@ class SyncDesktopApp:
     def start_login(self) -> None:
         backend_url = self.backend_url_var.get().strip()
         if not backend_url:
-            messagebox.showerror("Missing backend URL", "Enter the backend URL before signing in.")
+            messagebox.showerror(_("Missing backend URL"), _("Enter the backend URL before signing in."))
             return
 
         self.login_in_progress = True
         self._update_ui_state()
-        self.log("Creating desktop login request...")
+        self.log(_("Creating desktop login request..."))
         thread = threading.Thread(target=self._login_worker, daemon=True)
         thread.start()
 
@@ -1918,25 +2070,30 @@ class SyncDesktopApp:
                     self.events.put(("login_approved", status))
                     return
         except Exception as exc:
-            self.events.put(("error", f"Desktop login failed: {exc}"))
+            self.events.put(("error", _("Desktop login failed: {error}").format(error=exc)))
 
     def start_sync(self) -> None:
         port = self.port_var.get().strip()
         if not port:
-            messagebox.showerror("Missing serial port", "Choose a detected dive computer serial port.")
+            messagebox.showerror(_("Missing serial port"), _("Choose a detected dive computer serial port."))
             return
         if not self.auth_token:
-            messagebox.showerror("Not signed in", "Sign in to the backend first.")
+            messagebox.showerror(_("Not signed in"), _("Sign in to the backend first."))
             return
         detection = self.detected_devices_by_port.get(port)
         if detection is None:
-            messagebox.showerror("Device not detected", "Run Scan Ports and choose a serial port with a detected dive computer.")
+            messagebox.showerror(
+                _("Device not detected"),
+                _("Run Scan Ports and choose a serial port with a detected dive computer."),
+            )
             return
         if detection.get("confirmed") != "true":
             messagebox.showerror(
-                "Device not confirmed",
-                "The scan found a possible dive computer on this port, but could not confirm the exact model. "
-                "Sync is blocked to avoid using the wrong device descriptor.",
+                _("Device not confirmed"),
+                _(
+                    "The scan found a possible dive computer on this port, but could not confirm the exact model. "
+                    "Sync is blocked to avoid using the wrong device descriptor."
+                ),
             )
             return
 
@@ -1945,7 +2102,7 @@ class SyncDesktopApp:
         self.sync_existing_total = None
         self.sync_in_progress = True
         self._update_ui_state()
-        self.log("Starting sync...")
+        self.log(_("Starting sync..."))
         thread = threading.Thread(target=self._sync_worker, args=(detection,), daemon=True)
         thread.start()
 
@@ -1961,7 +2118,7 @@ class SyncDesktopApp:
             )
             self.events.put(("sync_complete", result))
         except Exception as exc:
-            self.events.put(("error", f"Sync failed: {exc}"))
+            self.events.put(("error", _("Sync failed: {error}").format(error=exc)))
 
     def _pump_events(self) -> None:
         try:
@@ -1969,20 +2126,24 @@ class SyncDesktopApp:
                 event, payload = self.events.get_nowait()
                 if event == "login_started":
                     self.current_code = payload["code"]
-                    self.auth_var.set("Browser approval pending. Finish login in the opened browser tab.")
-                    self.log(f"Opened browser for backend login approval: {payload['approval_url']}")
+                    self.auth_var.set(_("Browser approval pending. Finish login in the opened browser tab."))
+                    self.log(
+                        _("Opened browser for backend login approval: {url}").format(
+                            url=payload["approval_url"]
+                        )
+                    )
                     webbrowser.open(payload["approval_url"])
                 elif event == "login_approved":
                     self.login_in_progress = False
                     self.auth_token = payload.get("token")
                     self.auth_token_expires_at = payload.get("token_expires_at")
-                    email = payload.get("email") or "signed-in user"
-                    self.auth_var.set(f"Signed in as {email}. Desktop sync token ready.")
-                    self.log("Desktop login approved. You can start syncing now.")
+                    email = payload.get("email") or _("signed-in user")
+                    self.auth_var.set(_("Signed in as {email}. Desktop sync token ready.").format(email=email))
+                    self.log(_("Desktop login approved. You can start syncing now."))
                 elif event == "sync_progress":
                     self.sync_imported = int(payload.get("imported", 0))
                     self.sync_skipped = int(payload.get("skipped", 0))
-                    self.status_var.set(f"Syncing dives: {self.sync_imported} synced")
+                    self.status_var.set(_("Syncing dives: {imported} synced").format(imported=self.sync_imported))
                 elif event == "sync_complete":
                     self.sync_in_progress = False
                     self.sync_imported = int(payload.get("imported", 0))
@@ -1990,10 +2151,17 @@ class SyncDesktopApp:
                     existing_total = payload.get("existing_total")
                     self.sync_existing_total = existing_total if isinstance(existing_total, int) and existing_total >= 0 else None
                     if self.sync_imported == 0 and self.sync_skipped == 0 and self.sync_existing_total is not None:
-                        self.log(f"No new dives to sync. {self.sync_existing_total} dives already present in the backend.")
+                        self.log(
+                            _("No new dives to sync. {total} dives already present in the backend.").format(
+                                total=self.sync_existing_total
+                            )
+                        )
                     else:
                         self.log(
-                            f"Sync completed successfully. {self.sync_imported} dives synced, {self.sync_skipped} already present."
+                            _("Sync completed successfully. {imported} dives synced, {skipped} already present.").format(
+                                imported=self.sync_imported,
+                                skipped=self.sync_skipped,
+                            )
                         )
                 elif event == "ports_scanned":
                     self.scan_in_progress = False
@@ -2014,10 +2182,15 @@ class SyncDesktopApp:
                         self._update_detected_device_field()
                         if len(detections) == 1:
                             detection = detections[0]
-                            self.log(f"Detected {detection['label']} on {detection['port']}.")
+                            self.log(
+                                _("Detected {device} on {port}.").format(
+                                    device=detection["label"],
+                                    port=detection["port"],
+                                )
+                            )
                         else:
                             summary = ", ".join(f"{detection['port']} ({detection['label']})" for detection in detections)
-                            self.log(f"Detected dive computers on: {summary}.")
+                            self.log(_("Detected dive computers on: {summary}.").format(summary=summary))
                     else:
                         self.detected_devices_by_port = {}
                         self.port_combo["values"] = []
@@ -2026,14 +2199,16 @@ class SyncDesktopApp:
                         self._update_detected_device_field()
                         if ports:
                             self.log(
-                                f"No {format_dive_computer_name(vendor, product)} detected. "
-                                f"Available serial ports: {', '.join(ports)}."
+                                _("No {device} detected. Available serial ports: {ports}.").format(
+                                    device=format_dive_computer_name(vendor, product),
+                                    ports=", ".join(ports),
+                                )
                             )
                         else:
                             self.port_combo["values"] = []
                             self.port_var.set("")
-                            self.detected_device_var.set("Not detected")
-                            self.log("No serial ports found.")
+                            self.detected_device_var.set(_("Not detected"))
+                            self.log(_("No serial ports found."))
                 elif event == "ports_scan_failed":
                     self.scan_in_progress = False
                     self.detected_devices_by_port = {}
@@ -2043,7 +2218,7 @@ class SyncDesktopApp:
                     self.login_in_progress = False
                     self.sync_in_progress = False
                     self.log(str(payload))
-                    messagebox.showerror("Dive Sync", str(payload))
+                    messagebox.showerror(_("Dive Sync"), str(payload))
         except Empty:
             pass
         finally:
@@ -2053,12 +2228,11 @@ class SyncDesktopApp:
 
 def run_gui(defaults: dict[str, str]) -> None:
     if tk is None or ttk is None or messagebox is None:
-        raise RuntimeError("Tkinter is not available in this Python installation.")
+        raise RuntimeError(_("Tkinter is not available in this Python installation."))
 
     set_windows_appusermodel_id()
     root = tk.Tk()
     app = SyncDesktopApp(root, defaults)
-    app.log("Desktop UI ready.")
     try:
         root.mainloop()
     except KeyboardInterrupt:
@@ -2072,6 +2246,7 @@ def main() -> None:
         "backend_url": default_backend_url(),
         "vendor": "Mares",
         "product": "Smart Air",
+        "language": current_language_code(),
     }
     defaults.update(load_saved_defaults())
     run_gui(

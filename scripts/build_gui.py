@@ -19,10 +19,15 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRYPOINT = ROOT / "divevault-importer.py"
 DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
-RUNTIME_DEPS_DIR = LIBDIVECOMPUTER_DIR / "runtime"
-ASSETS_DIR = ROOT / "assets"
-LOGO_PNG = ASSETS_DIR / "logo.png"
-LOGO_ICO = ASSETS_DIR / "logo.ico"
+LIBDIVECOMPUTER_DIR = ROOT / "libdivecomputer-0.9.0"
+RUNTIME_DEPS_DIR = ROOT / "libdivecomputer-0.9.0" / "runtime"
+LOGO_DATA_FILES = (
+    (ROOT / "assets" / "logo.png", "assets"),
+    (ROOT / "assets" / "logo_header.png", "assets"),
+    (ROOT / "assets" / "logo_header_app.png", "assets"),
+)
+TRANSLATION_FILES = tuple((path, "translations") for path in (ROOT / "translations").glob("*.json"))
+LOGO_ICO = ROOT / "assets" / "logo.ico"
 VERSION_FILE = ROOT / "VERSION"
 
 
@@ -94,8 +99,12 @@ def pyinstaller_args() -> list[str]:
         str(ENTRYPOINT),
     ]
 
-    if LOGO_PNG.exists():
-        args.extend(["--add-data", add_data_arg(LOGO_PNG)])
+    for logo_file, destination in LOGO_DATA_FILES:
+        if logo_file.exists():
+            args.extend(["--add-data", add_data_arg(logo_file, destination)])
+    for translation_file, destination in TRANSLATION_FILES:
+        if translation_file.exists():
+            args.extend(["--add-data", add_data_arg(translation_file, destination)])
     if VERSION_FILE.exists():
         args.extend(["--add-data", add_data_arg(VERSION_FILE)])
 
