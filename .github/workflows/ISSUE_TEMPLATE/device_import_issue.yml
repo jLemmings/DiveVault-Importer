@@ -1,0 +1,50 @@
+name: Device Import Issue
+description: Problems importing dives from a dive computer
+title: "[Import]: "
+labels:
+  - import
+  - device
+body:
+  - type: input
+    id: model
+    attributes:
+      label: Dive computer model
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Device firmware version
+
+  - type: input
+    id: connection
+    attributes:
+      label: Connection type
+      placeholder: USB / Bluetooth
+
+  - type: input
+    id: divevault_version
+    attributes:
+      label: DiveVault version
+    validations:
+      required: true
+
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: Describe the problem
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Import logs
+      render: text
+
+  - type: textarea
+    id: sample
+    attributes:
+      label: Sample dive file
+      description: Attach a sample export if possible.
