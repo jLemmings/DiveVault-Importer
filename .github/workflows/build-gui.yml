@@ -19,6 +19,7 @@ jobs:
     env:
       GOFLAGS: -mod=readonly
       CGO_ENABLED: '1'
+      CGO_LDFLAGS_ALLOW: -Wl,-rpath,@executable_path/../Frameworks
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
