@@ -20,7 +20,9 @@ jobs:
       GOFLAGS: -mod=readonly
       CGO_ENABLED: '1'
     steps:
-      - uses: actions/checkout@v6
+      - name: Check out repository
+        uses: actions/checkout@v7
+
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -98,8 +100,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
