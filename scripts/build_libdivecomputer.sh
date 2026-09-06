@@ -5,8 +5,8 @@ cd "$ROOT/vendor/libdivecomputer-0.9.0"
 if [ -f Makefile ]; then make clean; fi
 # Uses installed libusb/hidapi when available. All device protocols stay upstream.
 autoreconf --install --force
-args=()
-case "$(uname -s)" in MINGW*|MSYS*) args+=(--host="$(gcc -dumpmachine)");; esac
-./configure --prefix="$ROOT/vendor/native" --disable-static "${args[@]}"
+configure_args=(--prefix="$ROOT/vendor/native" --disable-static)
+case "$(uname -s)" in MINGW*|MSYS*) configure_args+=(--host="$(gcc -dumpmachine)");; esac
+./configure "${configure_args[@]}"
 make -j"${JOBS:-4}"
 make install
