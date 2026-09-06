@@ -2,6 +2,8 @@ package divecomputer
 
 import (
 	"encoding/json"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +38,12 @@ func TestTelemetrySampleContract(t *testing.T) {
 func TestNativeDescriptors(t *testing.T) {
 	models, err := (Driver{}).Models()
 	if err != nil {
+		if runtime.GOOS == "windows" {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "the specified module could not be found") || strings.Contains(msg, "runtime not found") {
+				t.Skipf("native runtime unavailable in test environment: %v", err)
+			}
+		}
 		t.Fatal(err)
 	}
 	for _, model := range models["Mares"] {
