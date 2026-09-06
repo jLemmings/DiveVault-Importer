@@ -9,5 +9,6 @@ __pycache__/
 build/
 dist/
 vendor/
+internal/divecomputer/runtime/
 Thumbs.db
 .DS_Store

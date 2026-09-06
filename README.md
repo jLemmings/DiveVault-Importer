@@ -8,7 +8,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/libdivecomputer-0.9.0-0A66C2" alt="libdivecomputer 0.9.0">
-  <img src="https://img.shields.io/badge/PyInstaller-packaged-5C2D91" alt="PyInstaller packaged">
+  <img src="https://img.shields.io/badge/Go-desktop-00ADD8" alt="Go desktop application">
   <img src="https://img.shields.io/badge/Windows%20%7C%20Linux%20%7C%20macOS-builds-0078D4" alt="Windows, Linux, and macOS builds">
   <img src="https://img.shields.io/badge/GPL--3.0-licensed-A42E2B" alt="GPL 3.0 licensed">
 </p>
@@ -33,10 +33,10 @@ The easiest way to install DiveVault Importer is to download the latest release 
 
 1. Open the [DiveVault Importer releases page](https://github.com/jLemmings/DiveVault-Importer/releases).
 2. Download the newest asset for your OS:
-   - Windows: `DiveSync-windows-<version>.exe`
-   - macOS: `DiveSync-macos-<version>.zip`
-   - Linux: `DiveSync-linux-<version>`
-3. Run `DiveSync`.
+   - Windows: `DiveSync-windows-amd64-<version>.exe` (standalone; no DLL files needed)
+   - macOS: `DiveSync-darwin-<architecture>-<version>.zip`
+   - Linux: `DiveSync-linux-amd64-<version>.zip`
+3. On Windows, run the downloaded `.exe` directly. On Linux/macOS, extract the complete archive and run `DiveSync` (or `DiveSync.app`). Keep the Linux native libraries beside the executable.
 4. Select your dive computer brand, model, and serial port.
 5. Sign in through the browser approval flow when prompted.
 6. Start synchronization.
@@ -44,11 +44,14 @@ The easiest way to install DiveVault Importer is to download the latest release 
 On Linux, you may need to mark the downloaded binary as executable:
 
 ```bash
-chmod +x DiveSync-linux-<version>
-./DiveSync-linux-<version>
+cd DiveSync
+chmod +x DiveSync
+./DiveSync
 ```
 
 On macOS, unzip the release asset first, then open `DiveSync.app`.
+
+Linux requires the system OpenGL/X11, libusb and hidapi runtime libraries. See the [developer setup](./README-DEVELOPERS.md) for platform dependencies.
 
 ## What The Importer Does
 

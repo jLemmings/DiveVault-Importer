@@ -1,178 +1,119 @@
-name: Build GUI
+name: Build Go desktop importer
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - master
-      - feature/*
+    branches: [master, 'feature/*']
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-windows-runtime:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Install MinGW build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            autoconf \
-            automake \
-            binutils-mingw-w64 \
-            curl \
-            gcc-mingw-w64 \
-            libtool \
-            make \
-            mingw-w64-tools \
-            pkg-config
-
-      - name: Download libdivecomputer source
-        run: python3 scripts/fetch_libdivecomputer.py --source-only
-
-      - name: Build Windows runtime
-        run: bash scripts/build_libdivecomputer_windows.sh x86_64
-
-      - name: Upload Windows runtime artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: libdivecomputer-windows-x64
-          path: vendor/libdivecomputer-0.9.0/runtime/windows/*
-          if-no-files-found: error
-
-  build-gui:
-    needs: build-windows-runtime
-    runs-on: ${{ matrix.os }}
+  build:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            artifact_name: divesync-windows
-            artifact_path: dist/DiveSync.exe
-            python_cmd: python
-          - os: ubuntu-latest
-            artifact_name: divesync-linux
-            artifact_path: dist/DiveSync
-            python_cmd: python
-          - os: macos-latest
-            artifact_name: divesync-macos
-            artifact_path: dist/DiveSync.app
-            python_cmd: python
-
+        os: [windows-latest, ubuntu-22.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GOFLAGS: -mod=readonly
+      CGO_ENABLED: '1'
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
-          python-version: "3.14"
-
-      - name: Install Python dependencies
+          go-version-file: go.mod
+          cache: true
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
         run: |
-          ${{ matrix.python_cmd }} -m pip install --upgrade pip
-          ${{ matrix.python_cmd }} -m pip install -r requirements.txt -r requirements-build.txt
-
-      - name: Download Windows runtime artifact
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev
+      - name: macOS native dependencies
+        if: runner.os == 'macOS'
+        run: brew install autoconf automake libtool pkg-config libusb hidapi
+      - name: Windows native dependencies
         if: runner.os == 'Windows'
-        uses: actions/download-artifact@v8
+        uses: msys2/setup-msys2@v2
         with:
-          name: libdivecomputer-windows-x64
-          path: vendor/libdivecomputer-0.9.0/runtime/windows
-
-      - name: Build GUI executable
-        run: ${{ matrix.python_cmd }} scripts/build_gui.py
-
-      - name: Upload executable artifact
-        uses: actions/upload-artifact@v7
+          msystem: MINGW64
+          update: true
+          install: autoconf automake libtool make mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-libusb mingw-w64-x86_64-hidapi
+      - name: Fetch libdivecomputer 0.9.0
+        run: go run ./scripts/fetch
+      - name: Build libdivecomputer on Windows
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: bash scripts/build_libdivecomputer.sh
+      - name: Configure Windows Go toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          'C:\msys64\mingw64\bin' >> $env:GITHUB_PATH
+          "$pwd\vendor\native\bin" >> $env:GITHUB_PATH
+          'CC=gcc' >> $env:GITHUB_ENV
+      - name: Build libdivecomputer on Unix
+        if: runner.os != 'Windows'
+        run: |
+          bash scripts/build_libdivecomputer.sh
+          echo "LD_LIBRARY_PATH=$PWD/vendor/native/lib" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$PWD/vendor/native/lib" >> "$GITHUB_ENV"
+      - name: Verify formatting
+        shell: bash
+        run: test -z "$(gofmt -l main.go main_test.go resources.go theme.go internal scripts/fetch scripts/package)"
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Package desktop application
+        run: go run ./scripts/package
+      - name: Verify standalone Windows runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $smokeDir = Join-Path $env:RUNNER_TEMP ('DiveSync standalone ' + [guid]::NewGuid())
+          New-Item -ItemType Directory -Path $smokeDir | Out-Null
+          $binary = Get-ChildItem dist/DiveSync-windows-*.exe | Select-Object -First 1
+          Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $smokeDir 'DiveSync.exe')
+          $env:LOCALAPPDATA = Join-Path $smokeDir 'cache'
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $stdout = Join-Path $smokeDir 'stdout.txt'
+          $stderr = Join-Path $smokeDir 'stderr.txt'
+          $process = Start-Process -FilePath (Join-Path $smokeDir 'DiveSync.exe') -ArgumentList '-check-runtime' -WorkingDirectory $smokeDir -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          Get-Content $stdout, $stderr
+          if ($process.ExitCode -ne 0) { throw "Standalone runtime check failed: $($process.ExitCode)" }
+      - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_path }}
+          name: DiveSync-${{ runner.os }}
+          path: |
+            dist/*.zip
+            dist/*.exe
           if-no-files-found: error
 
   release:
     if: github.event_name != 'pull_request'
-    needs: build-gui
+    needs: build
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           path: release-assets
-
-      - name: Determine release version
+          merge-multiple: true
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+        shell: bash
         run: |
-          base_version="$(tr -d '[:space:]' < VERSION)"
-          if [ -z "$base_version" ]; then
-            echo "VERSION file is empty." >&2
-            exit 1
+          version="$(tr -d '[:space:]' < VERSION)"
+          test -n "$version"
+          flags=()
+          if gh release view "$version" >/dev/null 2>&1; then
+            version="${version}-$(git rev-parse --short=7 HEAD)"
+            flags+=(--prerelease)
           fi
-
-          short_sha="$(git rev-parse --short=7 "$GITHUB_SHA")"
-          release_version="$base_version"
-          prerelease_flag="false"
-
-          if gh release view "$base_version" >/dev/null 2>&1; then
-            release_version="${base_version}-${short_sha}"
-            prerelease_flag="true"
-          fi
-
-          echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
-          echo "RELEASE_PRERELEASE=$prerelease_flag" >> "$GITHUB_ENV"
-
-      - name: Prepare release assets
-        run: |
-          mkdir -p release-upload
-
-          if [ -f release-assets/divesync-windows/DiveSync.exe ]; then
-            cp release-assets/divesync-windows/DiveSync.exe "release-upload/DiveSync-windows-${RELEASE_VERSION}.exe"
-          fi
-
-          if [ -f release-assets/divesync-linux/DiveSync ]; then
-            cp release-assets/divesync-linux/DiveSync "release-upload/DiveSync-linux-${RELEASE_VERSION}"
-          fi
-
-          if [ -d release-assets/divesync-macos/DiveSync.app ]; then
-            ditto -c -k --sequesterRsrc --keepParent \
-              release-assets/divesync-macos/DiveSync.app \
-              "release-upload/DiveSync-macos-${RELEASE_VERSION}.zip"
-          fi
-
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          mapfile -t assets < <(find release-upload -maxdepth 1 -type f)
-          if [ "${#assets[@]}" -eq 0 ]; then
-            echo "No release-upload assets were prepared." >&2
-            exit 1
-          fi
-
-          release_args=(
-            "$RELEASE_VERSION"
-            "${assets[@]}"
-            --title "DiveVault Importer $RELEASE_VERSION"
-            --notes "Automated GUI build for commit ${{ github.sha }}"
-            --latest=false
-          )
-
-          if [ "$RELEASE_PRERELEASE" = "true" ]; then
-            release_args+=(--prerelease)
-          fi
-
-          gh release create "${release_args[@]}"
+          gh release create "$version" release-assets/* --title "DiveVault Importer $version" --notes "Go desktop build for commit $GITHUB_SHA" --latest=false "${flags[@]}"

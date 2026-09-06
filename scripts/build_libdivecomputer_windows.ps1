@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$bashScript = Join-Path $scriptDir "build_libdivecomputer_windows.sh"
+$bashScript = Join-Path $scriptDir "build_libdivecomputer.sh"
 $repoRoot = (Resolve-Path (Join-Path $scriptDir "..")).Path
 
 if (-not (Test-Path $bashScript)) {
@@ -40,7 +40,8 @@ if (Test-Path (Join-Path $msysRoot "usr\bin\bash.exe")) {
 $env:DIVEVAULT_IMPORTER_ROOT = $repoRoot
 Push-Location $repoRoot
 try {
-    & $bashExe --login $bashScript @args
+    & $bashExe $bashScript @args
+    if ($LASTEXITCODE -ne 0) { throw "libdivecomputer build failed ($LASTEXITCODE)" }
 } finally {
     Pop-Location
 }
