@@ -65,7 +65,14 @@ jobs:
       - name: Verify formatting
         shell: bash
         run: test -z "$(gofmt -l main.go main_test.go resources.go theme.go internal scripts/fetch scripts/package)"
-      - name: Test
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\msys64\mingw64\bin;$pwd\vendor\native\bin;$env:PATH"
+          go test ./...
+      - name: Test (Unix)
+        if: runner.os != 'Windows'
         run: go test ./...
       - name: Vet
         run: go vet ./...
