@@ -242,6 +242,21 @@ func windowsDependencies(dir string) error {
 				}
 			}
 			if found == "" {
+				// MSYS2 packages may ship hidapi under transport-specific names.
+				for _, alt := range windowsDependencyAlternatives(dll) {
+					for _, path := range filepath.SplitList(os.Getenv("PATH")) {
+						candidate := filepath.Join(path, alt)
+						if _, err := os.Stat(candidate); err == nil {
+							found = candidate
+							break
+						}
+					}
+					if found != "" {
+						break
+					}
+				}
+			}
+			if found == "" {
 				return fmt.Errorf("missing runtime dependency %s (required by %s)", dll, file)
 			}
 			if err := copyFile(found, dest); err != nil {
@@ -251,6 +266,15 @@ func windowsDependencies(dir string) error {
 		}
 	}
 	return nil
+}
+
+func windowsDependencyAlternatives(dll string) []string {
+	switch strings.ToLower(dll) {
+	case "libhidapi-0.dll":
+		return []string{"libhidapi-hidraw-0.dll", "libhidapi-libusb-0.dll", "libhidapi.dll"}
+	default:
+		return nil
+	}
 }
 func macBundle(base, binDir, libDir string) error {
 	plist := `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleName</key><string>DiveSync</string><key>CFBundleDisplayName</key><string>DiveSync</string><key>CFBundleIdentifier</key><string>ch.divevault.importer</string><key>CFBundleExecutable</key><string>DiveSync</string><key>CFBundlePackageType</key><string>APPL</string><key>NSHighResolutionCapable</key><true/></dict></plist>`
