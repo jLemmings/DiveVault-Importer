@@ -129,18 +129,25 @@ func build() error {
 			return err
 		}
 	}
-	for _, name := range []string{"LICENSE", "VERSION"} {
-		if err := copyFile(name, filepath.Join(base, name)); err != nil {
+	metaDir := base
+	if runtime.GOOS == "darwin" {
+		metaDir = filepath.Join(base, "Contents", "Resources")
+		if err := os.MkdirAll(metaDir, 0755); err != nil {
 			return err
 		}
 	}
-	if err := copyFile("vendor/libdivecomputer-0.9.0/COPYING", filepath.Join(base, "LICENSE-libdivecomputer")); err != nil {
+	for _, name := range []string{"LICENSE", "VERSION"} {
+		if err := copyFile(name, filepath.Join(metaDir, name)); err != nil {
+			return err
+		}
+	}
+	if err := copyFile("vendor/libdivecomputer-0.9.0/COPYING", filepath.Join(metaDir, "LICENSE-libdivecomputer")); err != nil {
 		return err
 	}
-	if err := copyFile("go.mod", filepath.Join(base, "go.mod")); err != nil {
+	if err := copyFile("go.mod", filepath.Join(metaDir, "go.mod")); err != nil {
 		return err
 	}
-	if err := moduleLicenses(base); err != nil {
+	if err := moduleLicenses(metaDir); err != nil {
 		return err
 	}
 	version, err := os.ReadFile("VERSION")
