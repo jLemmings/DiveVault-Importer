@@ -47,7 +47,7 @@ require_cmd "${HOST}-gcc"
 
 if [ ! -d "$LIBDIVECOMPUTER_DIR" ]; then
   echo "Missing libdivecomputer source tree at $LIBDIVECOMPUTER_DIR" >&2
-  echo "Run python scripts/fetch_libdivecomputer.py --source-only first." >&2
+  echo "Run go run -mod=mod ./scripts/fetch first." >&2
   exit 1
 fi
 
