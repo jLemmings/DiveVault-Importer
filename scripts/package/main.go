@@ -204,6 +204,7 @@ func windowsDependencies(dir string) error {
 		return err
 	}
 	seen := map[string]bool{}
+	searchDirs := windowsDependencySearchDirs(dir)
 	for len(queue) > 0 {
 		file := queue[0]
 		queue = queue[1:]
@@ -234,7 +235,7 @@ func windowsDependencies(dir string) error {
 				continue
 			}
 			var found string
-			for _, path := range filepath.SplitList(os.Getenv("PATH")) {
+			for _, path := range searchDirs {
 				candidate := filepath.Join(path, dll)
 				if _, err := os.Stat(candidate); err == nil {
 					found = candidate
@@ -244,7 +245,7 @@ func windowsDependencies(dir string) error {
 			if found == "" {
 				// MSYS2 packages may ship hidapi under transport-specific names.
 				for _, alt := range windowsDependencyAlternatives(dll) {
-					for _, path := range filepath.SplitList(os.Getenv("PATH")) {
+					for _, path := range searchDirs {
 						candidate := filepath.Join(path, alt)
 						if _, err := os.Stat(candidate); err == nil {
 							found = candidate
@@ -266,6 +267,25 @@ func windowsDependencies(dir string) error {
 		}
 	}
 	return nil
+}
+
+func windowsDependencySearchDirs(runtimeDir string) []string {
+	seen := map[string]bool{}
+	dirs := []string{}
+	add := func(path string) {
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		dirs = append(dirs, path)
+	}
+	add(runtimeDir)
+	for _, path := range filepath.SplitList(os.Getenv("PATH")) {
+		add(path)
+	}
+	add(`C:\msys64\mingw64\bin`)
+	add(`C:\msys64\usr\bin`)
+	return dirs
 }
 
 func windowsDependencyAlternatives(dll string) []string {
