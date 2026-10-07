@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-//go:embed assets/logo.png assets/logo.ico assets/logo_header.png translations/*.json VERSION
+//go:embed assets/logo.png assets/logo.ico assets/logo_icon.png assets/logo_header.png translations/*.json VERSION
 var resources embed.FS
 
 func version() string { b, _ := resources.ReadFile("VERSION"); return strings.TrimSpace(string(b)) }
