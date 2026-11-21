@@ -22,7 +22,7 @@ jobs:
   # Race detector, security-focused unit tests and short fuzzing runs.
   tests:
     name: Race detector and fuzzing
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -63,7 +63,7 @@ jobs:
   # actually reachable from this code.
   govulncheck:
     name: Vulnerability scan (govulncheck)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -84,7 +84,7 @@ jobs:
   # crypto, hard-coded credentials, unsafe HTTP handling, ...).
   gosec:
     name: Static analysis (gosec)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
