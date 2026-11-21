@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches: [master, 'feature/*']
-    # Stable releases: push a tag equal to the VERSION file, e.g. 0.3.0.
-    tags: ['[0-9]+.[0-9]+.[0-9]+']
+    # Stable releases: push a tag equal to the VERSION file, e.g. 0.3.0 or v0.3.0.
+    tags: ['[0-9]+.[0-9]+.[0-9]+', 'v[0-9]+.[0-9]+.[0-9]+']
   pull_request:
 
 permissions:
@@ -45,7 +45,7 @@ jobs:
         run: |
           base="$(tr -d '[:space:]' < VERSION)"
           if [ "$REF_TYPE" = tag ]; then
-            if [ "$REF_NAME" != "$base" ]; then
+            if [ "${REF_NAME#v}" != "$base" ]; then
               echo "::error::Tag $REF_NAME does not match VERSION ($base)"
               exit 1
             fi
@@ -179,9 +179,12 @@ jobs:
             dist/*.exe
           if-no-files-found: error
 
-  # Tags matching VERSION create a draft stable release for review; pushes to
-  # master replace the single rolling "nightly" pre-release. Feature branches
-  # and pull requests never publish.
+  # Tags matching VERSION create (or fill) a draft stable release for review.
+  # Pushes to master publish a uniquely tagged <VERSION>-dev.<sha> pre-release
+  # and prune all but the newest few. Tags are never reused, because this
+  # repository uses immutable releases: a published release's tag can't be
+  # recreated even after the release is deleted. Feature branches and pull
+  # requests never publish.
   publish:
     name: Publish release
     if: >-
@@ -236,17 +239,37 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" release-assets/* --draft --verify-tag \
-            --title "DiveVault Importer $TAG" --generate-notes
-          echo "Draft release $TAG created; review and publish it on GitHub." >> "$GITHUB_STEP_SUMMARY"
-      - name: Update nightly pre-release
+          state="$(gh release view "$TAG" --json isDraft -q 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo missing)"
+          case "$state" in
+            missing)
+              gh release create "$TAG" release-assets/* --draft --verify-tag \
+                --title "DiveVault Importer $TAG" --generate-notes ;;
+            draft)
+              # A draft prepared by hand on GitHub: attach the binaries to it.
+              gh release upload "$TAG" release-assets/* --clobber ;;
+            *)
+              echo "::error::Release $TAG is already published. Immutable releases can't receive assets; delete it and push a new version tag."
+              exit 1 ;;
+          esac
+          echo "Draft release $TAG is ready; review and publish it on GitHub." >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish development pre-release
         if: github.ref_type != 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          KEEP_DEV_RELEASES: '3'
         run: |
-          gh release delete nightly --cleanup-tag --yes 2>/dev/null || true
-          notes="Automated development build $DIVESYNC_VERSION from commit $GITHUB_SHA. Not a stable release.
-          Verify downloads with \`sha256sum -c SHA256SUMS.txt\` or \`gh attestation verify <file> -R $GH_REPO\`."
-          gh release create nightly release-assets/* --prerelease --latest=false --target "$GITHUB_SHA" \
-            --title "DiveVault Importer nightly ($DIVESYNC_VERSION)" --notes "$notes"
+          tag="$DIVESYNC_VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Pre-release $tag already exists (re-run); nothing to publish."
+          else
+            notes="Automated development build of commit $GITHUB_SHA. Not a stable release.
+          Verify downloads with \`sha256sum -c SHA256SUMS.txt --ignore-missing\` or \`gh attestation verify <file> -R $GH_REPO\`."
+            gh release create "$tag" release-assets/* --prerelease --latest=false --target "$GITHUB_SHA" \
+              --title "DiveVault Importer $tag" --notes "$notes"
+          fi
+          # Keep only the newest development builds.
+          gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            -q '[.[] | select(.isPrerelease and (.tagName | test("-dev[.][0-9a-f]{7}$")))] | sort_by(.createdAt) | reverse | .[]?.tagName' |
+            tail -n +"$((KEEP_DEV_RELEASES + 1))" |
+            while read -r old; do gh release delete "$old" --cleanup-tag --yes && echo "Pruned $old"; done

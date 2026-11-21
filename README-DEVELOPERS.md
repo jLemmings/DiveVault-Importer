@@ -68,8 +68,9 @@ Extract the whole archive on Linux/macOS. Keep Linux native libraries beside the
 
 `VERSION` always holds the *next* version to be released.
 
-- Every push to `master` replaces the rolling `nightly` pre-release with a build stamped `<VERSION>-dev.<short sha>`. Feature branches and pull requests build and test but never publish.
-- To cut a stable release, make sure `VERSION` holds the version (for example `0.3.0`), then push a matching tag: `git tag 0.3.0 && git push origin 0.3.0`. CI rejects a tag that doesn't match `VERSION`, builds every platform, runs the security workflow, and creates a **draft** release with generated notes. Review the draft on GitHub and publish it; it then becomes the latest release.
+- Every push to `master` publishes a pre-release tagged `<VERSION>-dev.<short sha>`; only the newest three are kept. Feature branches and pull requests build and test but never publish.
+- To cut a stable release, make sure `VERSION` holds the version (for example `0.3.0`), then push a matching tag: `git tag 0.3.0 && git push origin 0.3.0` (`v0.3.0` works too). CI rejects a tag that doesn't match `VERSION`, builds every platform, runs the security workflow, and creates a **draft** release with generated notes. If you already prepared a draft on GitHub for that tag, CI attaches the binaries to it instead. Review the draft and publish it; it then becomes the latest release.
+- **Never publish a release on GitHub before CI has attached its binaries.** The repository uses immutable releases: a published release can't receive assets later, and its tag can never be reused, even after deleting the release. The same rule is why development builds use a unique tag per commit instead of a rolling `nightly` tag.
 - After publishing, bump `VERSION` on `master` to the next planned version.
 
 Publishing waits for the build matrix and `.github/workflows/security.yml` (tests with the race detector, fuzzing, govulncheck, gosec, zizmor). Each release includes `SHA256SUMS.txt`, a CycloneDX SBOM and a GitHub build provenance attestation.

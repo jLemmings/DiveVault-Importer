@@ -53,7 +53,7 @@ On macOS, unzip the release asset first, then open `DiveSync.app`.
 
 To verify a download, check it against the release's `SHA256SUMS.txt` (`sha256sum -c SHA256SUMS.txt --ignore-missing`) or its build provenance with the GitHub CLI: `gh attestation verify <file> -R jLemmings/DiveVault-Importer`.
 
-The `nightly` pre-release always holds an untested build of the latest `master` commit; use it only to try unreleased fixes.
+Pre-releases named `<version>-dev.<commit>` are untested builds of recent `master` commits; use them only to try unreleased fixes.
 
 Linux requires the system OpenGL/X11/Wayland, libusb and hidapi runtime libraries. See the [developer setup](./README-DEVELOPERS.md) for platform dependencies.
 
