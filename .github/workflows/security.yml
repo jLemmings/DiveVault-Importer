@@ -32,7 +32,7 @@ jobs:
       - name: Native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev
+          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
       - name: Build libdivecomputer
         run: |
           go run ./scripts/fetch
@@ -74,7 +74,7 @@ jobs:
       - name: Native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev
+          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
       - name: Fetch libdivecomputer headers
         run: go run ./scripts/fetch
       - name: govulncheck
@@ -94,7 +94,7 @@ jobs:
       - name: Native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev
+          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
       - name: Fetch libdivecomputer headers
         run: go run ./scripts/fetch
       - name: gosec
