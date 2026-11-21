@@ -76,7 +76,10 @@ func main() {
 	a := app.NewWithID("ch.divevault.importer")
 	a.Settings().SetTheme(newDiveVaultTheme())
 	iconName := "assets/logo.png"
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "linux":
+		iconName = "assets/logo_icon.png"
+	case "windows":
 		iconName = "assets/logo.ico"
 	}
 	icon, _ := resources.ReadFile(iconName)
