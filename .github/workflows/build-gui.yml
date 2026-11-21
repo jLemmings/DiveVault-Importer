@@ -4,17 +4,28 @@ on:
   workflow_dispatch:
   push:
     branches: [master, 'feature/*']
+    # Stable releases: push a tag equal to the VERSION file, e.g. 0.3.0.
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  security:
+    uses: ./.github/workflows/security.yml
+
   build:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04, macos-latest]
+        # ubuntu-22.04 keeps the Linux glibc requirement low; macos-15-intel
+        # covers Intel Macs alongside the Apple Silicon macos-latest runner.
+        os: [windows-latest, ubuntu-22.04, ubuntu-22.04-arm, macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     env:
       GOFLAGS: -mod=readonly
@@ -23,11 +34,33 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Determine version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          base="$(tr -d '[:space:]' < VERSION)"
+          if [ "$REF_TYPE" = tag ]; then
+            if [ "$REF_NAME" != "$base" ]; then
+              echo "::error::Tag $REF_NAME does not match VERSION ($base)"
+              exit 1
+            fi
+            version="$base"
+          else
+            version="$base-dev.${GITHUB_SHA::7}"
+          fi
+          echo "Building DiveSync $version"
+          echo "DIVESYNC_VERSION=$version" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          # Builds that publish releases never restore a shared cache.
+          cache: ${{ github.ref_type != 'tag' && github.ref != 'refs/heads/master' }} # zizmor: ignore[cache-poisoning] disabled on publishing refs
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: |
@@ -81,7 +114,47 @@ jobs:
         run: go test -count=1 -shuffle=on ./...
       - name: Vet
         run: go vet ./...
+      # Signing is optional: without these secrets the build falls back to an
+      # ad-hoc macOS signature and an unsigned Windows executable. Secrets are
+      # never exposed to pull request builds.
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE" ]; then echo "No macOS signing certificate configured"; exit 0; fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/signing.p12"
+      - name: Prepare Windows code signing
+        if: runner.os == 'Windows' && github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { 'No Windows signing certificate configured'; exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe not found' }
+          "WINDOWS_SIGN_CERT_FILE=$pfx" >> $env:GITHUB_ENV
+          "SIGNTOOL=$($signtool.FullName)" >> $env:GITHUB_ENV
       - name: Package desktop application
+        env:
+          MACOS_SIGN_IDENTITY: ${{ github.event_name != 'pull_request' && secrets.MACOS_SIGN_IDENTITY || '' }}
+          MACOS_NOTARY_APPLE_ID: ${{ github.event_name != 'pull_request' && secrets.MACOS_NOTARY_APPLE_ID || '' }}
+          MACOS_NOTARY_TEAM_ID: ${{ github.event_name != 'pull_request' && secrets.MACOS_NOTARY_TEAM_ID || '' }}
+          MACOS_NOTARY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.MACOS_NOTARY_PASSWORD || '' }}
+          WINDOWS_SIGN_CERT_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
         run: go run ./scripts/package
       - name: Verify standalone Windows runtime
         if: runner.os == 'Windows'
@@ -100,38 +173,80 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "Standalone runtime check failed: $($process.ExitCode)" }
       - uses: actions/upload-artifact@v7
         with:
-          name: DiveSync-${{ runner.os }}
+          name: DiveSync-${{ runner.os }}-${{ runner.arch }}
           path: |
             dist/*.zip
             dist/*.exe
           if-no-files-found: error
 
-  release:
-    if: github.event_name != 'pull_request'
-    needs: build
+  # Tags matching VERSION create a draft stable release for review; pushes to
+  # master replace the single rolling "nightly" pre-release. Feature branches
+  # and pull requests never publish.
+  publish:
+    name: Publish release
+    if: >-
+      github.ref_type == 'tag' ||
+      (github.ref == 'refs/heads/master' && github.event_name != 'pull_request')
+    needs: [build, security]
     runs-on: ubuntu-latest
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+    env:
+      GOFLAGS: -mod=readonly
+      CYCLONEDX_GOMOD_VERSION: v1.9.0
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
-      - name: Publish release
+      - name: Generate SBOM and checksums
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          base="$(tr -d '[:space:]' < VERSION)"
+          if [ "$REF_TYPE" = tag ]; then version="$base"; else version="$base-dev.${GITHUB_SHA::7}"; fi
+          echo "DIVESYNC_VERSION=$version" >> "$GITHUB_ENV"
+          go run "github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@${CYCLONEDX_GOMOD_VERSION}" \
+            mod -json -licenses -output "release-assets/DiveSync-${version}.sbom.cdx.json"
+          cd release-assets
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: release-assets/*
+      - name: Create draft stable release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        shell: bash
+          TAG: ${{ github.ref_name }}
         run: |
-          version="$(tr -d '[:space:]' < VERSION)"
-          test -n "$version"
-          flags=()
-          if gh release view "$version" >/dev/null 2>&1; then
-            version="${version}-$(git rev-parse --short=7 HEAD)"
-            flags+=(--prerelease)
-          fi
-          gh release create "$version" release-assets/* --title "DiveVault Importer $version" --notes "Go desktop build for commit $GITHUB_SHA" --latest=false "${flags[@]}"
+          gh release create "$TAG" release-assets/* --draft --verify-tag \
+            --title "DiveVault Importer $TAG" --generate-notes
+          echo "Draft release $TAG created; review and publish it on GitHub." >> "$GITHUB_STEP_SUMMARY"
+      - name: Update nightly pre-release
+        if: github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete nightly --cleanup-tag --yes 2>/dev/null || true
+          notes="Automated development build $DIVESYNC_VERSION from commit $GITHUB_SHA. Not a stable release.
+          Verify downloads with \`sha256sum -c SHA256SUMS.txt\` or \`gh attestation verify <file> -R $GH_REPO\`."
+          gh release create nightly release-assets/* --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "DiveVault Importer nightly ($DIVESYNC_VERSION)" --notes "$notes"

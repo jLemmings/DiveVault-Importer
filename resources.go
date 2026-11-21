@@ -9,7 +9,18 @@ import (
 //go:embed assets/logo.png assets/logo.ico assets/logo_icon.png assets/logo_header.png translations/*.json VERSION
 var resources embed.FS
 
-func version() string { b, _ := resources.ReadFile("VERSION"); return strings.TrimSpace(string(b)) }
+// buildVersion is set by scripts/package via -ldflags "-X main.buildVersion=..."
+// so snapshot builds report e.g. "0.3.0-dev.1a2b3c4" instead of the plain
+// VERSION file contents.
+var buildVersion string
+
+func version() string {
+	if buildVersion != "" {
+		return buildVersion
+	}
+	b, _ := resources.ReadFile("VERSION")
+	return strings.TrimSpace(string(b))
+}
 func translator(language string) func(string) string {
 	b, _ := resources.ReadFile("translations/" + language + ".json")
 	messages := map[string]string{}

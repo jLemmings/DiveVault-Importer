@@ -31,11 +31,11 @@ The GUI handles device selection, port scanning, browser-based backend sign-in, 
 
 The easiest way to install DiveVault Importer is to download the latest release for your operating system.
 
-1. Open the [DiveVault Importer releases page](https://github.com/jLemmings/DiveVault-Importer/releases).
-2. Download the newest asset for your OS:
+1. Open the [latest DiveVault Importer release](https://github.com/jLemmings/DiveVault-Importer/releases/latest).
+2. Download the asset for your OS:
    - Windows: `DiveSync-windows-amd64-<version>.exe` (standalone; no DLL files needed)
-   - macOS: `DiveSync-darwin-<architecture>-<version>.zip`
-   - Linux: `DiveSync-linux-amd64-<version>.zip`
+   - macOS: `DiveSync-darwin-arm64-<version>.zip` (Apple Silicon) or `DiveSync-darwin-amd64-<version>.zip` (Intel)
+   - Linux: `DiveSync-linux-amd64-<version>.zip` or `DiveSync-linux-arm64-<version>.zip`
 3. On Windows, run the downloaded `.exe` directly. On Linux/macOS, extract the complete archive and run `DiveSync` (or `DiveSync.app`). Keep the Linux native libraries beside the executable.
 4. Select your dive computer brand, model, and serial port.
 5. Sign in through the browser approval flow when prompted.
@@ -51,7 +51,11 @@ chmod +x DiveSync
 
 On macOS, unzip the release asset first, then open `DiveSync.app`.
 
-Linux requires the system OpenGL/X11, libusb and hidapi runtime libraries. See the [developer setup](./README-DEVELOPERS.md) for platform dependencies.
+To verify a download, check it against the release's `SHA256SUMS.txt` (`sha256sum -c SHA256SUMS.txt --ignore-missing`) or its build provenance with the GitHub CLI: `gh attestation verify <file> -R jLemmings/DiveVault-Importer`.
+
+The `nightly` pre-release always holds an untested build of the latest `master` commit; use it only to try unreleased fixes.
+
+Linux requires the system OpenGL/X11/Wayland, libusb and hidapi runtime libraries. See the [developer setup](./README-DEVELOPERS.md) for platform dependencies.
 
 ## What The Importer Does
 

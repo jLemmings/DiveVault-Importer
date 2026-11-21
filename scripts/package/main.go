@@ -59,6 +59,10 @@ func build() error {
 		return err
 	}
 	defer os.RemoveAll(stage)
+	version, err := releaseVersion()
+	if err != nil {
+		return err
+	}
 	base := filepath.Join(stage, "DiveSync")
 	binDir, libDir := base, base
 	exe := "DiveSync"
@@ -77,14 +81,17 @@ func build() error {
 		return err
 	}
 	args := []string{"build", "-mod=readonly", "-trimpath", "-o", filepath.Join(binDir, exe)}
+	ldflags := "-X main.buildVersion=" + version
 	if runtime.GOOS == "windows" {
 		cleanup, err := prepareWindowsRuntime()
 		if err != nil {
 			return err
 		}
 		defer cleanup()
-		args = append(args, "-tags=bundled", "-ldflags=-H=windowsgui")
+		args = append(args, "-tags=bundled")
+		ldflags += " -H=windowsgui"
 	}
+	args = append(args, "-ldflags="+ldflags)
 	args = append(args, ".")
 	if err := run("go", args...); err != nil {
 		return err
@@ -123,9 +130,12 @@ func build() error {
 		if len(remaining) > 0 {
 			return fmt.Errorf("executable still requires external DLLs: %v", remaining)
 		}
+		if err := signWindows(filepath.Join(binDir, exe)); err != nil {
+			return err
+		}
 	}
 	if runtime.GOOS == "darwin" {
-		if err := macBundle(base, binDir, libDir); err != nil {
+		if err := macBundle(base, binDir, libDir, version); err != nil {
 			return err
 		}
 	}
@@ -136,10 +146,11 @@ func build() error {
 			return err
 		}
 	}
-	for _, name := range []string{"LICENSE", "VERSION"} {
-		if err := copyFile(name, filepath.Join(metaDir, name)); err != nil {
-			return err
-		}
+	if err := copyFile("LICENSE", filepath.Join(metaDir, "LICENSE")); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "VERSION"), []byte(version+"\n"), 0644); err != nil {
+		return err
 	}
 	if err := copyFile("vendor/libdivecomputer-0.9.0/COPYING", filepath.Join(metaDir, "LICENSE-libdivecomputer")); err != nil {
 		return err
@@ -150,11 +161,7 @@ func build() error {
 	if err := moduleLicenses(metaDir); err != nil {
 		return err
 	}
-	version, err := os.ReadFile("VERSION")
-	if err != nil {
-		return err
-	}
-	archive := filepath.Join("dist", fmt.Sprintf("DiveSync-%s-%s-%s.zip", runtime.GOOS, runtime.GOARCH, strings.TrimSpace(string(version))))
+	archive := filepath.Join("dist", fmt.Sprintf("DiveSync-%s-%s-%s.zip", runtime.GOOS, runtime.GOARCH, version))
 	if runtime.GOOS == "windows" {
 		standalone := strings.TrimSuffix(archive, ".zip") + ".exe"
 		if err := copyFile(filepath.Join(binDir, exe), standalone); err != nil {
@@ -162,10 +169,7 @@ func build() error {
 		}
 	}
 	if runtime.GOOS == "darwin" {
-		if err := run("codesign", "--force", "--deep", "--sign", "-", base); err != nil {
-			return err
-		}
-		return run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", base, archive)
+		return signAndArchiveMac(base, libDir, filepath.Join(binDir, exe), archive)
 	}
 	return zipTree(base, archive)
 }
@@ -296,8 +300,8 @@ func windowsDependencyAlternatives(dll string) []string {
 		return nil
 	}
 }
-func macBundle(base, binDir, libDir string) error {
-	plist := `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleName</key><string>DiveSync</string><key>CFBundleDisplayName</key><string>DiveSync</string><key>CFBundleIdentifier</key><string>ch.divevault.importer</string><key>CFBundleExecutable</key><string>DiveSync</string><key>CFBundlePackageType</key><string>APPL</string><key>NSHighResolutionCapable</key><true/></dict></plist>`
+func macBundle(base, binDir, libDir, version string) error {
+	plist := infoPlist(version)
 	if err := os.WriteFile(filepath.Join(base, "Contents", "Info.plist"), []byte(plist), 0644); err != nil {
 		return err
 	}
