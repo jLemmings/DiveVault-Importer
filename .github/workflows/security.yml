@@ -1,0 +1,124 @@
+name: Security testing
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, 'feature/*']
+  pull_request:
+  schedule:
+    # Weekly, so newly published advisories are caught even without commits.
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=readonly
+  CGO_ENABLED: '1'
+  GOVULNCHECK_VERSION: v1.1.4
+  GOSEC_VERSION: v2.22.11
+
+jobs:
+  # Race detector, security-focused unit tests and short fuzzing runs.
+  tests:
+    name: Race detector and fuzzing
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev
+      - name: Build libdivecomputer
+        run: |
+          go run ./scripts/fetch
+          bash scripts/build_libdivecomputer.sh
+          echo "LD_LIBRARY_PATH=$PWD/vendor/native/lib" >> "$GITHUB_ENV"
+      - name: Security tests
+        run: go test -count=1 -v -run 'Security' ./...
+      - name: Full test suite with race detector
+        run: go test -count=1 -race -shuffle=on ./...
+      - name: Fuzz
+        run: |
+          set -euo pipefail
+          fuzz() { echo "::group::$2 ($1)"; go test -run='^$' -fuzz="^$2\$" -fuzztime=30s "$1"; echo "::endgroup::"; }
+          fuzz ./internal/backend FuzzNew
+          fuzz ./internal/backend FuzzNormalizeToken
+          fuzz ./internal/importer FuzzRecord
+          fuzz ./internal/settings FuzzLanguage
+          fuzz ./internal/settings FuzzLoad
+      - name: Upload fuzz crashers
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashers
+          path: '**/testdata/fuzz/**'
+          if-no-files-found: ignore
+
+  # Known vulnerabilities in the Go toolchain and module dependencies that are
+  # actually reachable from this code.
+  govulncheck:
+    name: Vulnerability scan (govulncheck)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # Same toolchain as the release build, so stdlib advisories are accurate.
+          go-version-file: go.mod
+          cache: true
+      - name: Native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev
+      - name: Fetch libdivecomputer headers
+        run: go run ./scripts/fetch
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} -show verbose ./...
+
+  # Static analysis for insecure code patterns (TLS misconfiguration, weak
+  # crypto, hard-coded credentials, unsafe HTTP handling, ...).
+  gosec:
+    name: Static analysis (gosec)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev
+      - name: Fetch libdivecomputer headers
+        run: go run ./scripts/fetch
+      - name: gosec
+        # Triaged exclusions (all reviewed against the current code):
+        #   G115 integer conversions in cgo bindings / masked tar modes
+        #   G204 build script invokes toolchain commands by design
+        #   G301/G306 release bundles intentionally use 0755/0644
+        #   G304 every read path comes from the app's config dir, embed FS or build tree
+        #   G110 decompression of the pinned libdivecomputer release (build-time only)
+        run: >-
+          go run github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}
+          -exclude-generated -exclude-dir=vendor -exclude-dir=build
+          -exclude=G115,G204,G301,G304,G306,G110
+          ./...
+
+  # Lint workflows for script injection and over-broad permissions.
+  workflow-lint:
+    name: Workflow security (zizmor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pipx run zizmor==1.32.0 --min-severity=high .github/workflows
