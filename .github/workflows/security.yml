@@ -4,6 +4,12 @@ on:
   # Pushes and pull requests run this through build-gui.yml, so the release job
   # can depend on it. It is not triggered directly to avoid running twice.
   workflow_call:
+    inputs:
+      ref:
+        description: 'Commit to test (default: the triggering commit)'
+        type: string
+        required: false
+        default: ''
   workflow_dispatch:
   schedule:
     # Weekly, so newly published advisories are caught even without commits.
@@ -26,6 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
@@ -69,6 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
@@ -92,6 +100,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
@@ -123,6 +132,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - name: zizmor
         env:
