@@ -68,10 +68,22 @@ Extract the whole archive on Linux/macOS. Keep Linux native libraries beside the
 
 `VERSION` always holds the *next* version to be released.
 
-- Every push to `master` publishes a pre-release tagged `<VERSION>-dev.<short sha>`; only the newest three are kept. Feature branches and pull requests build and test but never publish.
-- To cut a stable release, make sure `VERSION` holds the version (for example `0.3.0`), then push a matching tag: `git tag 0.3.0 && git push origin 0.3.0` (`v0.3.0` works too). CI rejects a tag that doesn't match `VERSION`, builds every platform, runs the security workflow, and creates a **draft** release with generated notes. If you already prepared a draft on GitHub for that tag, CI attaches the binaries to it instead. Review the draft and publish it; it then becomes the latest release.
-- **Never publish a release on GitHub before CI has attached its binaries.** The repository uses immutable releases: a published release can't receive assets later, and its tag can never be reused, even after deleting the release. The same rule is why development builds use a unique tag per commit instead of a rolling `nightly` tag.
-- After publishing, bump `VERSION` on `master` to the next planned version.
+### Stable release
+
+1. Make sure `VERSION` on `master` holds the version you're releasing, for example `0.3.2`.
+2. On GitHub, click **Draft a new release**. Enter the tag `0.3.2` (or `v0.3.2`), choose `master` as the target, write or generate the notes, and click **Save draft**. Do **not** publish yet.
+3. Open **Actions → Build Go desktop importer → Run workflow** on `master`. Leave the tag empty to use the newest draft, or enter it. CI checks the tag against `VERSION`, creates the tag at the draft's target commit, builds every platform, runs the security workflow and attaches all binaries, `SHA256SUMS.txt` and the SBOM to the draft.
+4. When the run is green, open the draft, check the assets and click **Publish release**.
+
+**Never publish before step 4.** The repository uses immutable releases: a published release can't receive assets later, and its tag name can never be used again, even after deleting the release. If it happens anyway, delete the empty release, bump `VERSION` and start over with a new version.
+
+Pushing a version tag directly (`git tag 0.3.2 && git push origin 0.3.2`) also works; CI then creates the draft itself.
+
+After publishing, bump `VERSION` on `master` to the next planned version.
+
+### Development builds
+
+Every push to `master` publishes a pre-release tagged `<VERSION>-dev.<short sha>`; only the newest three are kept. Each uses a unique tag, again because of immutable releases. Feature branches and pull requests build and test but never publish.
 
 Publishing waits for the build matrix and `.github/workflows/security.yml` (tests with the race detector, fuzzing, govulncheck, gosec, zizmor). Each release includes `SHA256SUMS.txt`, a CycloneDX SBOM and a GitHub build provenance attestation.
 

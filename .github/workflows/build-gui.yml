@@ -1,7 +1,15 @@
 name: Build Go desktop importer
 
 on:
+  # Stable release: "Draft a new release" on GitHub, save the draft, then run
+  # this workflow. It tags the draft's target commit, builds everything and
+  # attaches the binaries to the draft; then publish the draft on GitHub.
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Tag of the draft release to build (empty = newest draft)
+        required: false
+        default: ''
   push:
     branches: [master, 'feature/*']
     # Stable releases: push a tag equal to the VERSION file, e.g. 0.3.0 or v0.3.0.
@@ -16,10 +24,79 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides what this run is for and which commit and version it builds:
+  #   stable - a draft release (manual run) or a pushed version tag
+  #   dev    - a push to master, published as <VERSION>-dev.<sha>
+  #   none   - feature branches and pull requests: build and test only
+  resolve:
+    name: Resolve release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # draft releases are only visible with write access
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mode=none sha="$GITHUB_SHA" tag=""
+          if [ "$EVENT" = workflow_dispatch ]; then
+            tag="$INPUT_TAG"
+            if [ -z "$tag" ]; then
+              tag="$(gh release list --limit 100 --json tagName,isDraft,createdAt \
+                -q '[.[] | select(.isDraft)] | sort_by(.createdAt) | last | .tagName // ""')"
+            fi
+            target="$( [ -n "$tag" ] && gh release view "$tag" --json isDraft,targetCommitish \
+              -q 'if .isDraft then .targetCommitish else "" end' 2>/dev/null || true)"
+            if [ -z "$target" ]; then
+              echo "::error::No draft release found${tag:+ for $tag}. On GitHub, use 'Draft a new release', save it as a draft, then run this workflow again."
+              exit 1
+            fi
+            sha="$(gh api "repos/$GH_REPO/commits/$target" -q .sha)"
+            mode=stable
+            echo "Building draft release $tag from $target ($sha)"
+          elif [ "$REF_TYPE" = tag ]; then
+            mode=stable tag="$REF_NAME"
+          elif [ "$REF" = refs/heads/master ] && [ "$EVENT" = push ]; then
+            mode=dev
+          fi
+          base="$(gh api "repos/$GH_REPO/contents/VERSION?ref=$sha" -H 'Accept: application/vnd.github.raw' | tr -d '[:space:]')"
+          if [ "$mode" = stable ]; then
+            if [ "${tag#v}" != "$base" ]; then
+              echo "::error::Release tag $tag does not match VERSION ($base) at $sha. Update VERSION on master first, or rename the draft's tag."
+              exit 1
+            fi
+            version="$base"
+          else
+            version="$base-dev.${sha::7}"
+          fi
+          echo "mode=$mode sha=$sha tag=$tag version=$version"
+          {
+            echo "mode=$mode"
+            echo "sha=$sha"
+            echo "tag=$tag"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
   security:
+    needs: resolve
     uses: ./.github/workflows/security.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
 
   build:
+    needs: resolve
     strategy:
       fail-fast: false
       matrix:
@@ -31,36 +108,19 @@ jobs:
       GOFLAGS: -mod=readonly
       CGO_ENABLED: '1'
       CGO_LDFLAGS_ALLOW: -Wl,-rpath,@executable_path/../Frameworks
+      DIVESYNC_VERSION: ${{ needs.resolve.outputs.version }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
+          ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
-
-      - name: Determine version
-        shell: bash
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          base="$(tr -d '[:space:]' < VERSION)"
-          if [ "$REF_TYPE" = tag ]; then
-            if [ "${REF_NAME#v}" != "$base" ]; then
-              echo "::error::Tag $REF_NAME does not match VERSION ($base)"
-              exit 1
-            fi
-            version="$base"
-          else
-            version="$base-dev.${GITHUB_SHA::7}"
-          fi
-          echo "Building DiveSync $version"
-          echo "DIVESYNC_VERSION=$version" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           # Builds that publish releases never restore a shared cache.
-          cache: ${{ github.ref_type != 'tag' && github.ref != 'refs/heads/master' }} # zizmor: ignore[cache-poisoning] disabled on publishing refs
+          cache: ${{ needs.resolve.outputs.mode == 'none' }} # zizmor: ignore[cache-poisoning] disabled whenever the build is published
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: |
@@ -179,18 +239,16 @@ jobs:
             dist/*.exe
           if-no-files-found: error
 
-  # Tags matching VERSION create (or fill) a draft stable release for review.
-  # Pushes to master publish a uniquely tagged <VERSION>-dev.<sha> pre-release
-  # and prune all but the newest few. Tags are never reused, because this
-  # repository uses immutable releases: a published release's tag can't be
-  # recreated even after the release is deleted. Feature branches and pull
-  # requests never publish.
+  # Stable: tags the release commit, then attaches binaries to the draft
+  # release (creating the draft for a plain tag push). Dev: publishes a
+  # uniquely tagged <VERSION>-dev.<sha> pre-release and prunes old ones.
+  # Tags are never reused: this repository uses immutable releases, so a
+  # published release can't get assets later and its tag can never be
+  # recreated, even after the release is deleted.
   publish:
     name: Publish release
-    if: >-
-      github.ref_type == 'tag' ||
-      (github.ref == 'refs/heads/master' && github.event_name != 'pull_request')
-    needs: [build, security]
+    if: needs.resolve.outputs.mode != 'none'
+    needs: [resolve, build, security]
     runs-on: ubuntu-latest
     concurrency:
       group: publish-release
@@ -202,10 +260,15 @@ jobs:
     env:
       GOFLAGS: -mod=readonly
       CYCLONEDX_GOMOD_VERSION: v1.9.0
+      DIVESYNC_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
+          ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
@@ -217,14 +280,9 @@ jobs:
           path: release-assets
           merge-multiple: true
       - name: Generate SBOM and checksums
-        env:
-          REF_TYPE: ${{ github.ref_type }}
         run: |
-          base="$(tr -d '[:space:]' < VERSION)"
-          if [ "$REF_TYPE" = tag ]; then version="$base"; else version="$base-dev.${GITHUB_SHA::7}"; fi
-          echo "DIVESYNC_VERSION=$version" >> "$GITHUB_ENV"
           go run "github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@${CYCLONEDX_GOMOD_VERSION}" \
-            mod -json -licenses -output "release-assets/DiveSync-${version}.sbom.cdx.json"
+            mod -json -licenses -output "release-assets/DiveSync-${DIVESYNC_VERSION}.sbom.cdx.json"
           cd release-assets
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -232,40 +290,49 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: release-assets/*
-      - name: Create draft stable release
-        if: github.ref_type == 'tag'
+      - name: Attach binaries to draft stable release
+        if: needs.resolve.outputs.mode == 'stable'
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
         run: |
-          state="$(gh release view "$TAG" --json isDraft -q 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo missing)"
-          case "$state" in
-            missing)
-              gh release create "$TAG" release-assets/* --draft --verify-tag \
-                --title "DiveVault Importer $TAG" --generate-notes ;;
-            draft)
-              # A draft prepared by hand on GitHub: attach the binaries to it.
-              gh release upload "$TAG" release-assets/* --clobber ;;
-            *)
-              echo "::error::Release $TAG is already published. Immutable releases can't receive assets; delete it and push a new version tag."
-              exit 1 ;;
-          esac
-          echo "Draft release $TAG is ready; review and publish it on GitHub." >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          state="$(gh release view "$RELEASE_TAG" --json isDraft -q 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo missing)"
+          if [ "$state" = published ]; then
+            echo "::error::Release $RELEASE_TAG was published before CI attached its binaries, and immutable releases can't receive assets. Delete it, bump VERSION, and release again: Draft a new release, save the draft, run this workflow, then publish."
+            exit 1
+          fi
+          # Tag the built commit so publishing the draft can't point anywhere else.
+          if gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            tagged="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" -q .sha)"
+            if [ "$tagged" != "$RELEASE_SHA" ]; then
+              echo "::error::Tag $RELEASE_TAG already points at $tagged, not the built commit $RELEASE_SHA"
+              exit 1
+            fi
+          else
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$RELEASE_TAG" -f sha="$RELEASE_SHA" >/dev/null
+            echo "Created tag $RELEASE_TAG at $RELEASE_SHA"
+          fi
+          if [ "$state" = draft ]; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --draft --verify-tag \
+              --title "DiveVault Importer $RELEASE_TAG" --generate-notes
+          fi
+          url="$(gh release view "$RELEASE_TAG" --json url -q .url)"
+          echo "Binaries attached to draft release [$RELEASE_TAG]($url). Review it and click **Publish release**." >> "$GITHUB_STEP_SUMMARY"
       - name: Publish development pre-release
-        if: github.ref_type != 'tag'
+        if: needs.resolve.outputs.mode == 'dev'
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
           KEEP_DEV_RELEASES: '3'
         run: |
           tag="$DIVESYNC_VERSION"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Pre-release $tag already exists (re-run); nothing to publish."
           else
-            notes="Automated development build of commit $GITHUB_SHA. Not a stable release.
+            notes="Automated development build of commit $RELEASE_SHA. Not a stable release.
           Verify downloads with \`sha256sum -c SHA256SUMS.txt --ignore-missing\` or \`gh attestation verify <file> -R $GH_REPO\`."
-            gh release create "$tag" release-assets/* --prerelease --latest=false --target "$GITHUB_SHA" \
+            gh release create "$tag" release-assets/* --prerelease --latest=false --target "$RELEASE_SHA" \
               --title "DiveVault Importer $tag" --notes "$notes"
           fi
           # Keep only the newest development builds.
