@@ -1,0 +1,10 @@
+# zizmor configuration (https://docs.zizmor.sh/configuration/).
+# Actions from these publishers are referenced by version tag and kept current
+# by Renovate; any other third-party action must be pinned to a commit SHA.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "actions/*": ref-pin
+        "msys2/*": ref-pin
+        "*": hash-pin
