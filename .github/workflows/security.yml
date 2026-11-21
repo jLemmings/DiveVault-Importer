@@ -1,10 +1,10 @@
 name: Security testing
 
 on:
+  # Pushes and pull requests run this through build-gui.yml, so the release job
+  # can depend on it. It is not triggered directly to avoid running twice.
+  workflow_call:
   workflow_dispatch:
-  push:
-    branches: [master, 'feature/*']
-  pull_request:
   schedule:
     # Weekly, so newly published advisories are caught even without commits.
     - cron: '17 4 * * 1'
@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -66,6 +68,8 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           # Same toolchain as the release build, so stdlib advisories are accurate.
@@ -87,6 +91,8 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod

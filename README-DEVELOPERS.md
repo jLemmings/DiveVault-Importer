@@ -54,13 +54,40 @@ go run ./scripts/package
 
 Run the extracted executable with `-check-runtime` to verify that libdivecomputer loads and its serial device catalog is available without opening the GUI or contacting hardware.
 
-The package command builds the real desktop application and produces `dist/DiveSync-<goos>-<goarch>-<version>.zip`. Windows additionally produces a standalone `.exe` with libdivecomputer and all its non-system DLL dependencies embedded inside it. macOS bundles include a `DiveSync.app` with relocated native libraries and an ad-hoc signature. Linux bundles include libdivecomputer beside the executable and use an executable-relative runtime search path. Linux users need system OpenGL/X11, libusb and hidapi runtimes. Official builds run on Windows, Ubuntu 22.04 and macOS in `.github/workflows/build-gui.yml`.
+The package command builds the real desktop application and produces `dist/DiveSync-<goos>-<goarch>-<version>.zip`. Windows additionally produces a standalone `.exe` with libdivecomputer and all its non-system DLL dependencies embedded inside it. macOS bundles include a `DiveSync.app` with relocated native libraries, signed ad-hoc unless signing credentials are configured (see below). Linux bundles include libdivecomputer beside the executable and use an executable-relative runtime search path. Linux users need system OpenGL/X11/Wayland, libusb and hidapi runtimes. Official builds run on Windows (amd64), Ubuntu 22.04 (amd64, arm64) and macOS (arm64, amd64) in `.github/workflows/build-gui.yml`.
+
+The version comes from `VERSION`; set `DIVESYNC_VERSION` to override it (CI stamps non-release builds as `<VERSION>-dev.<short sha>`). The value is embedded in the binary, the bundle's `VERSION` file, the macOS `Info.plist` and the archive name.
 
 On Windows, run the standalone executable directly; no adjacent DLL or installed native runtime is needed. The Windows system loader requires DLL files, so the application automatically extracts its embedded libraries into a content-addressed directory under `%LOCALAPPDATA%\DiveVault Importer\runtime`. It verifies the cached bytes against the embedded payload on every startup and loads only from that directory and Windows system directories. Concurrent instances share the verified cache. No administrator access is required, and the executable's directory can be read-only. The DLLs remain ordinary upstream libdivecomputer binaries; device protocols are still entirely implemented by that library.
 
 Windows source builds use `vendor/native/bin` and the configured development toolchain PATH. Release packaging generates the ignored `internal/divecomputer/runtime/` directory, compiles with `-tags=bundled`, and removes that generated directory after building. Do not run multiple package builds simultaneously in the same checkout.
 
-Extract the whole archive on Linux/macOS. Keep Linux native libraries beside the executable. Packaging uses a fresh staging directory, embeds the logos, translations and version, and includes the application and libdivecomputer licenses in the ZIP. macOS distribution is not notarized, and Windows executables are not code-signed.
+Extract the whole archive on Linux/macOS. Keep Linux native libraries beside the executable. Packaging uses a fresh staging directory, embeds the logos, translations and version, and includes the application and libdivecomputer licenses in the ZIP.
+
+## Releases
+
+`VERSION` always holds the *next* version to be released.
+
+- Every push to `master` replaces the rolling `nightly` pre-release with a build stamped `<VERSION>-dev.<short sha>`. Feature branches and pull requests build and test but never publish.
+- To cut a stable release, make sure `VERSION` holds the version (for example `0.3.0`), then push a matching tag: `git tag 0.3.0 && git push origin 0.3.0`. CI rejects a tag that doesn't match `VERSION`, builds every platform, runs the security workflow, and creates a **draft** release with generated notes. Review the draft on GitHub and publish it; it then becomes the latest release.
+- After publishing, bump `VERSION` on `master` to the next planned version.
+
+Publishing waits for the build matrix and `.github/workflows/security.yml` (tests with the race detector, fuzzing, govulncheck, gosec, zizmor). Each release includes `SHA256SUMS.txt`, a CycloneDX SBOM and a GitHub build provenance attestation.
+
+### Code signing
+
+Signing is optional and driven by repository secrets; pull request builds never receive them. Without them, macOS builds get an ad-hoc signature (Gatekeeper warns) and Windows executables are unsigned (SmartScreen warns).
+
+| Secret | Purpose |
+| --- | --- |
+| `MACOS_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` |
+| `MACOS_CERTIFICATE_PASSWORD` | Password of that `.p12` |
+| `MACOS_SIGN_IDENTITY` | Identity name, e.g. `Developer ID Application: Name (TEAMID)` |
+| `MACOS_NOTARY_APPLE_ID`, `MACOS_NOTARY_TEAM_ID`, `MACOS_NOTARY_PASSWORD` | Apple ID, team ID and app-specific password for `notarytool`; the app is stapled after notarization |
+| `WINDOWS_CERTIFICATE` | Base64-encoded code signing `.pfx` |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Password of that `.pfx` |
+
+Locally, `scripts/package` reads the same settings from `MACOS_SIGN_IDENTITY`, `MACOS_NOTARY_*`, `WINDOWS_SIGN_CERT_FILE`, `WINDOWS_SIGN_CERT_PASSWORD`, `SIGNTOOL` and `SIGN_TIMESTAMP_URL`; see `scripts/package/release.go`.
 
 ## Structure and compatibility
 
