@@ -42,7 +42,10 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          install: autoconf automake libtool make mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-libusb mingw-w64-x86_64-hidapi
+          # libusb/hidapi are not installed: build_libdivecomputer.sh configures
+          # Windows builds --without-libusb --without-hidapi, and MSYS2 no longer
+          # publishes those packages for the MINGW64 environment.
+          install: autoconf automake libtool make mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf
       - name: Fetch libdivecomputer 0.9.0
         run: go run ./scripts/fetch
       - name: Build libdivecomputer on Windows
