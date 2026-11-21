@@ -8,7 +8,7 @@ Fyne replaces Tkinter. The Go standard library handles HTTP, JSON, browser-appro
 
 - Go 1.26 or later and a C compiler compatible with cgo.
 - Autoconf, Automake, Libtool, Make and pkg-config.
-- Linux: OpenGL/X11 development packages, libusb and hidapi development packages. On Ubuntu: `sudo apt-get install autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev`.
+- Linux: OpenGL/X11/Wayland development packages, libusb and hidapi development packages. On Ubuntu: `sudo apt-get install autoconf automake libtool pkg-config libusb-1.0-0-dev libhidapi-dev libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev`.
 - macOS: Xcode command line tools; `brew install autoconf automake libtool pkg-config libusb hidapi`.
 - Windows: MSYS2 MINGW64 with `autoconf automake libtool make mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-libusb mingw-w64-x86_64-hidapi` installed through pacman.
 
