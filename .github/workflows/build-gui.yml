@@ -42,7 +42,10 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          install: autoconf automake libtool make mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-libusb mingw-w64-x86_64-hidapi
+          # libusb/hidapi are not installed: build_libdivecomputer.sh configures
+          # Windows builds --without-libusb --without-hidapi, and MSYS2 no longer
+          # publishes those packages for the MINGW64 environment.
+          install: autoconf automake libtool make mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf
       - name: Fetch libdivecomputer 0.9.0
         run: go run ./scripts/fetch
       - name: Build libdivecomputer on Windows
@@ -64,16 +67,18 @@ jobs:
           echo "DYLD_LIBRARY_PATH=$PWD/vendor/native/lib" >> "$GITHUB_ENV"
       - name: Verify formatting
         shell: bash
-        run: test -z "$(gofmt -l main.go main_test.go resources.go theme.go internal scripts/fetch scripts/package)"
+        run: |
+          unformatted="$(gofmt -l $(git ls-files '*.go'))"
+          if [ -n "$unformatted" ]; then echo "Unformatted files:"; echo "$unformatted"; exit 1; fi
       - name: Test (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $env:PATH = "C:\msys64\mingw64\bin;$pwd\vendor\native\bin;$env:PATH"
-          go test ./...
+          go test -count=1 -shuffle=on ./...
       - name: Test (Unix)
         if: runner.os != 'Windows'
-        run: go test ./...
+        run: go test -count=1 -shuffle=on ./...
       - name: Vet
         run: go vet ./...
       - name: Package desktop application
